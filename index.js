@@ -4,11 +4,23 @@ const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const notifier = require('node-notifier');
+const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+
+// ── TELEGRAM SETUP ─────────────────────────────────────────
+const telegramBot = process.env.TELEGRAM_BOT_TOKEN
+  ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN)
+  : null;
+
+if (telegramBot) {
+  console.log('📲 Telegram alerts enabled');
+} else {
+  console.log('⚠️  Telegram alerts disabled — TELEGRAM_BOT_TOKEN not set');
+}
 
 function loadStatusLog() {
   if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
@@ -23,7 +35,20 @@ function updateStatusLog(updates) {
 
 function sendAlert(title, message) {
   console.warn(`🔔 ALERT: ${title} — ${message}`);
+
+  // Desktop popup — works locally only
   notifier.notify({ title, message, sound: true, wait: false });
+
+  // Telegram alert — works on Render + locally
+  if (telegramBot && process.env.TELEGRAM_CHAT_ID) {
+    telegramBot.sendMessage(
+      process.env.TELEGRAM_CHAT_ID,
+      `🔔 *${title}*\n\n${message}`,
+      { parse_mode: 'Markdown' }
+    )
+    .then(() => console.log('📲 Telegram alert sent'))
+    .catch(err => console.error('📲 Telegram alert failed:', err.message));
+  }
 }
 
 // Auto-create upload folder if it doesn't exist
@@ -284,6 +309,11 @@ async function uploadFile(page, excelFile) {
 
       await page.screenshot({ path: `done-${fileName}.png` });
       console.log(`🎉 ${excelFile.name} — DONE!`);
+
+      sendAlert(
+        '✅ MTN GroupShare — Upload Complete',
+        `"${excelFile.name}" has been successfully processed and marked as DONE.`
+      );
       break;
     }
 
@@ -311,17 +341,17 @@ async function run() {
   await startServer();
 
   const browser = await chromium.launch({
-  headless: process.env.NODE_ENV !== 'development', // ← headless UNLESS explicitly development
-  slowMo: process.env.NODE_ENV === 'development' ? 300 : 0,
-  args: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-blink-features=AutomationControlled',
-    '--disable-infobars',
-    '--window-size=1280,720',
-  ]
-});
+    headless: process.env.NODE_ENV !== 'development',
+    slowMo: process.env.NODE_ENV === 'development' ? 300 : 0,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-infobars',
+      '--window-size=1280,720',
+    ]
+  });
 
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -341,16 +371,19 @@ async function run() {
     }
   });
 
-  // ── KEY FIX: page from context (not browser) — applies all headers + userAgent ──
   const page = await context.newPage();
 
-  // Hide Playwright's automation fingerprint from WAF detection
   await page.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
   try {
     await login(page);
+
+    sendAlert(
+      '🚀 MTN GroupShare — Bot Started',
+      'Bot has logged in successfully and is now monitoring for new files.'
+    );
 
     console.log('\n🔁 Entering main loop — press Ctrl+C to stop.\n');
     let idleCount = 0;
@@ -383,7 +416,7 @@ async function run() {
           await login(page);
         }
 
-        const { balanceText, totalMB: availableMB } = await checkBalance(page);
+        const { totalMB: availableMB } = await checkBalance(page);
         const requiredMB = getExcelTotalMB(pendingFiles[i].fullPath);
 
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
