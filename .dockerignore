@@ -1,0 +1,9 @@
+node_modules
+.env
+*.png
+*.log
+npm-debug.log
+.git
+.gitignore
+done-*.png
+timeout-*.png

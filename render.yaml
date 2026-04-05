@@ -1,0 +1,42 @@
+services:
+  - type: worker
+    name: mtn-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node index.js
+    envVars:
+      - key: MTN_PHONE
+        sync: false
+      - key: MTN_PIN
+        sync: false
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 6060
+      - key: NGROK_AUTHTOKEN
+        sync: false
+      - key: NGROK_DOMAIN
+        sync: false
+      - key: EXCEL_FOLDER_PATH
+        value: /data/upload_files
+    disk:
+      name: groupshare-data
+      mountPath: /data/upload_files
+      sizeGB: 1
+
+  - type: web
+    name: mtn-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node api-server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_PORT
+        value: 7070
+      - key: EXCEL_FOLDER_PATH
+        value: /data/upload_files
+    disk:
+      name: groupshare-data
+      mountPath: /data/upload_files
+      sizeGB: 1

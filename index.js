@@ -7,8 +7,7 @@ const notifier = require('node-notifier');
 require('dotenv').config();
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
-const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000; // 3 minutes
-
+const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 
 function loadStatusLog() {
@@ -69,19 +68,16 @@ function parseBalanceToMB(balanceText) {
   return totalMB;
 }
 
-// Detect if session has expired by checking for login page indicators
 async function isSessionActive(page) {
   try {
     await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle', timeout: 15000 });
     const currentUrl = page.url();
 
-    // Redirected to login = session expired
     if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
       console.log('🔒 Session expired — redirected to:', currentUrl);
       return false;
     }
 
-    // Check if DataVolume element exists = logged in
     const balanceEl = await page.$('h3[data-bind*="DataVolume"]');
     if (!balanceEl) {
       console.log('🔒 Session expired — balance element not found');
@@ -104,9 +100,15 @@ async function login(page) {
     console.log(`\n🔐 Login attempt ${attempts}/${maxLoginAttempts}...`);
 
     try {
-      await page.goto('https://up2u.mtn.com.gh/account/login', { waitUntil: 'networkidle' });
+      await page.goto('https://up2u.mtn.com.gh/account/login', {
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
 
-      await page.waitForSelector('#disclaimer-btn', { timeout: 10000 });
+      await page.screenshot({ path: 'login-debug.png', fullPage: true });
+      console.log('📸 Screenshot saved — login-debug.png');
+
+      await page.waitForSelector('#disclaimer-btn', { timeout: 30000 });
       await page.waitForTimeout(500);
       await page.dispatchEvent('#disclaimer-btn', 'click');
       console.log('✅ Disclaimer accepted');
@@ -127,7 +129,6 @@ async function login(page) {
 
       await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
 
-      // Confirm we are actually logged in
       if (await isSessionActive(page)) {
         console.log('🎉 Login successful:', page.url());
         return true;
@@ -161,7 +162,6 @@ async function checkBalance(page) {
   const totalMB = parseBalanceToMB(balanceText);
   console.log(`💰 Balance: ${balanceText} (${totalMB.toFixed(2)} MB)`);
 
-  // Persist for API
   updateStatusLog({
     _lastBalance: balanceText,
     _lastBalanceMB: totalMB,
@@ -203,7 +203,6 @@ async function uploadFile(page, excelFile) {
   console.log(`📦 Uploading: ${excelFile.name}`);
   console.log(`${'='.repeat(60)}`);
 
-  // Mark as IN_PROGRESS when starting
   updateStatusLog({
     [excelFile.name]: 'IN_PROGRESS',
     [`${excelFile.name}_startedAt`]: new Date().toISOString(),
@@ -238,7 +237,6 @@ async function uploadFile(page, excelFile) {
   await page.waitForURL('**/upload/upload-status', { timeout: 15000 });
   console.log('✅ Status page loaded — polling for DONE...');
 
-  // Mark as PROCESSING while waiting for portal to finish
   updateStatusLog({ [excelFile.name]: 'PROCESSING' });
 
   const maxAttempts = 70;
@@ -248,7 +246,6 @@ async function uploadFile(page, excelFile) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await page.reload({ waitUntil: 'networkidle' });
 
-    // Check for session expiry mid-upload
     if (page.url().includes('/account/login')) {
       console.warn('🔒 Session expired during polling — re-logging in...');
       sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired during upload polling. Re-logging in...');
@@ -273,7 +270,6 @@ async function uploadFile(page, excelFile) {
       isDone = true;
       markAsUploaded(excelFile.name);
 
-      // Mark as DONE in status log
       updateStatusLog({
         [excelFile.name]: 'DONE',
         [`${excelFile.name}_completedAt`]: new Date().toISOString(),
@@ -288,7 +284,6 @@ async function uploadFile(page, excelFile) {
   }
 
   if (!isDone) {
-    // Mark as TIMEOUT in status log
     updateStatusLog({
       [excelFile.name]: 'TIMEOUT',
       [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
@@ -308,19 +303,52 @@ async function uploadFile(page, excelFile) {
 async function run() {
   await startServer();
 
-  const browser = await chromium.launch({ headless: false, slowMo: 300 });
-  const page = await browser.newPage();
+  const browser = await chromium.launch({
+  headless: process.env.NODE_ENV !== 'development', // ← headless UNLESS explicitly development
+  slowMo: process.env.NODE_ENV === 'development' ? 300 : 0,
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-infobars',
+    '--window-size=1280,720',
+  ]
+});
+
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 720 },
+    extraHTTPHeaders: {
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'Upgrade-Insecure-Requests': '1',
+      'sec-fetch-dest': 'document',
+      'sec-fetch-mode': 'navigate',
+      'sec-fetch-site': 'none',
+      'sec-fetch-user': '?1',
+    }
+  });
+
+  // ── KEY FIX: page from context (not browser) — applies all headers + userAgent ──
+  const page = await context.newPage();
+
+  // Hide Playwright's automation fingerprint from WAF detection
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
 
   try {
-    // ── INITIAL LOGIN ──────────────────────────────────────
     await login(page);
 
-    // ── MAIN LOOP — runs forever until Ctrl+C ─────────────
     console.log('\n🔁 Entering main loop — press Ctrl+C to stop.\n');
     let idleCount = 0;
 
     while (true) {
-      // Always verify session is still active before doing anything
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
         sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired. Re-logging in automatically...');
@@ -330,7 +358,6 @@ async function run() {
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
 
       if (pendingFiles.length === 0) {
-        // No files — show balance and wait 3 minutes
         idleCount++;
         const { balanceText, totalMB } = await checkBalance(page);
         console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 3 mins...`);
@@ -338,14 +365,12 @@ async function run() {
         continue;
       }
 
-      // New files found
       idleCount = 0;
       console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
 
       for (let i = 0; i < pendingFiles.length; i++) {
         console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
 
-        // Re-check session before each file
         if (!await isSessionActive(page)) {
           console.log('🔒 Session lost before upload — re-logging in...');
           await login(page);
