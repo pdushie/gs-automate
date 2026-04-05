@@ -20,7 +20,8 @@ RUN npm install concurrently
 # Copy the rest of your project files
 COPY . .
 
-# Expose the API port
+# Expose the API and bot ports
+EXPOSE 6060
 EXPOSE 7070
 
 # Default command — starts the API server
@@ -28,4 +29,5 @@ EXPOSE 7070
 #CMD ["node", "api-server.js"]
 
 # Run both services
-CMD ["npx", "concurrently", "node index.js", "node api-server.js"]
+#CMD ["npx", "concurrently", "node index.js", "node api-server.js"]
+CMD ["node", "start.js"]
