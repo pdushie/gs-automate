@@ -12,6 +12,13 @@ app.use(express.json());
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 
+// Auto-create upload folder if it doesn't exist
+const uploadFolder = process.env.EXCEL_FOLDER_PATH;
+if (uploadFolder && !fs.existsSync(uploadFolder)) {
+  fs.mkdirSync(uploadFolder, { recursive: true });
+  console.log(`📁 Created upload folder: ${uploadFolder}`);
+}
+
 // Save uploaded files directly into the watch folder
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, process.env.EXCEL_FOLDER_PATH),

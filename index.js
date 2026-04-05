@@ -26,6 +26,13 @@ function sendAlert(title, message) {
   notifier.notify({ title, message, sound: true, wait: false });
 }
 
+// Auto-create upload folder if it doesn't exist
+const uploadFolder = process.env.EXCEL_FOLDER_PATH;
+if (uploadFolder && !fs.existsSync(uploadFolder)) {
+  fs.mkdirSync(uploadFolder, { recursive: true });
+  console.log(`📁 Created upload folder: ${uploadFolder}`);
+}
+
 function loadUploadedLog() {
   if (fs.existsSync(UPLOADED_LOG)) {
     return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
