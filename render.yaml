@@ -7,12 +7,14 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: PORT
+        value: "10000"
       - key: MTN_PHONE
         sync: false
       - key: MTN_PIN
         sync: false
       - key: OTP_PORT
-        value: 6060
+        value: "6060"
       - key: NGROK_AUTHTOKEN
         sync: false
       - key: NGROK_DOMAIN

@@ -17,7 +17,7 @@ api.on('exit', (code) => {
 // Bot uses OTP_PORT internally — not exposed to the internet
 const bot = spawn('node', ['index.js'], {
   stdio: 'inherit',
-  env: { ...process.env, PORT: process.env.OTP_PORT || '6060' }
+  env: { ...process.env, PORT: process.env.OTP_PORT || '6060' }  // already correct
 });
 
 bot.on('exit', (code) => {

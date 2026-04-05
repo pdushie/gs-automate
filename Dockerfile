@@ -23,7 +23,7 @@ COPY . .
 # Expose the API and bot ports
 EXPOSE 6060
 EXPOSE 7070
-
+EXPOSE 10000
 # Default command — starts the API server
 # Render will override this for the worker (bot) service via render.yaml
 #CMD ["node", "api-server.js"]
