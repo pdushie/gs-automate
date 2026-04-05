@@ -11,10 +11,8 @@ services:
         sync: false
       - key: MTN_PIN
         sync: false
-      - key: PORT
+      - key: OTP_PORT
         value: 6060
-      - key: API_PORT
-        value: 7070
       - key: NGROK_AUTHTOKEN
         sync: false
       - key: NGROK_DOMAIN

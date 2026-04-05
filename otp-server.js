@@ -65,7 +65,8 @@ function waitForOTP(timeoutMs = 120000) {
 
 // Start server and ngrok
 async function startServer() {
-  const PORT = process.env.PORT || 6060;
+  //const PORT = process.env.PORT || 6060;
+  const PORT = process.env.OTP_PORT || 6060;
   await new Promise((resolve) => app.listen(PORT, resolve));
   console.log(`🚀 OTP receiver running at http://localhost:${PORT}`);
 

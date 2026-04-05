@@ -23,7 +23,6 @@ if (uploadFolder && !fs.existsSync(uploadFolder)) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, process.env.EXCEL_FOLDER_PATH),
   filename: (req, file, cb) => {
-    // Keep original filename, append timestamp to avoid collisions
     const ext = path.extname(file.originalname);
     const base = path.basename(file.originalname, ext);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -55,7 +54,6 @@ function loadStatusLog() {
 // ── ROUTES ────────────────────────────────────────────────
 
 // POST /upload — accept an Excel file from external app
-// Usage: multipart/form-data with field name "file"
 app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: 'No file provided' });
@@ -70,8 +68,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
   });
 });
 
-// POST /upload-base64 — accept Excel as base64 string (for apps that can't do multipart)
-// Body: { "filename": "myfile.xlsx", "data": "<base64 string>" }
+// POST /upload-base64 — accept Excel as base64 string
 app.post('/upload-base64', (req, res) => {
   const { filename, data } = req.body;
 
@@ -142,7 +139,7 @@ app.get('/status/:filename', (req, res) => {
   });
 });
 
-// GET /balance — get current data balance (read from last known check)
+// GET /balance — get current data balance
 app.get('/balance', (req, res) => {
   const statusLog = loadStatusLog();
   res.json({
@@ -158,16 +155,20 @@ app.get('/health', (req, res) => {
   res.json({ success: true, status: 'running', time: new Date().toISOString() });
 });
 
-const API_PORT = process.env.API_PORT || 7070;
+// ── PORT BINDING ───────────────────────────────────────────
+// Use Render's injected PORT first, then API_PORT, then default 7070
+const API_PORT = process.env.PORT || process.env.API_PORT || 7070;
+const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${API_PORT}`;
+
 app.listen(API_PORT, () => {
-  console.log(`🚀 API server running at http://localhost:${API_PORT}`);
+  console.log(`🚀 API server running on port ${API_PORT}`);
   console.log(`📡 Endpoints:`);
-  console.log(`   POST http://localhost:${API_PORT}/upload         — upload .xlsx file (multipart)`);
-  console.log(`   POST http://localhost:${API_PORT}/upload-base64  — upload .xlsx file (base64)`);
-  console.log(`   GET  http://localhost:${API_PORT}/status         — list all file statuses`);
-  console.log(`   GET  http://localhost:${API_PORT}/status/:file   — get specific file status`);
-  console.log(`   GET  http://localhost:${API_PORT}/balance        — get current data balance`);
-  console.log(`   GET  http://localhost:${API_PORT}/health         — health check`);
+  console.log(`   POST ${PUBLIC_URL}/upload         — upload .xlsx file (multipart)`);
+  console.log(`   POST ${PUBLIC_URL}/upload-base64  — upload .xlsx file (base64)`);
+  console.log(`   GET  ${PUBLIC_URL}/status         — list all file statuses`);
+  console.log(`   GET  ${PUBLIC_URL}/status/:file   — get specific file status`);
+  console.log(`   GET  ${PUBLIC_URL}/balance        — get current data balance`);
+  console.log(`   GET  ${PUBLIC_URL}/health         — health check`);
 });
 
 module.exports = app;
