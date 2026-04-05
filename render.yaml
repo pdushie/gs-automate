@@ -13,8 +13,6 @@ services:
         sync: false
       - key: OTP_PORT
         value: 6060
-      - key: API_PORT
-        value: 7070
       - key: NGROK_AUTHTOKEN
         sync: false
       - key: NGROK_DOMAIN
