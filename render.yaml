@@ -13,12 +13,15 @@ services:
         sync: false
       - key: OTP_PORT
         value: 6060
+      - key: API_PORT
+        value: 7070
       - key: NGROK_AUTHTOKEN
         sync: false
       - key: NGROK_DOMAIN
         sync: false
       - key: EXCEL_FOLDER_PATH
         value: /data/upload_files
+    healthCheckPath: /health
     disk:
       name: groupshare-data
       mountPath: /data/upload_files

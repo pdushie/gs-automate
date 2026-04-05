@@ -73,7 +73,8 @@ function waitForOTP(timeoutMs = 180000) {
 async function startServer() {
   // On Render Web Service, PORT is injected by Render (usually 10000).
   // On Background Worker or locally, fall back to OTP_PORT or 6060.
-  const PORT = process.env.PORT || process.env.OTP_PORT || 6060;
+  // OTP server must NOT use process.env.PORT — that belongs to api-server.js
+const PORT = process.env.OTP_PORT || 6060;
 
   await new Promise((resolve) => app.listen(PORT, '0.0.0.0', resolve));
   console.log(`🚀 OTP receiver running at http://0.0.0.0:${PORT}`);
