@@ -122,7 +122,7 @@ async function login(page) {
       await page.waitForURL('**/account/verify-otp', { timeout: 15000 });
       console.log('✅ OTP page — waiting for SMS...');
 
-      const otp = await waitForOTP(120000);
+      const otp = await waitForOTP(180000); // 3 minutes
       console.log(`✅ OTP received: ${otp}`);
       await page.fill('input[name="OTPCode"]', otp);
       await page.dispatchEvent('#login-btn', 'click');
