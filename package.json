@@ -1,0 +1,25 @@
+{
+  "name": "automate-groupshare",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "api": "node api-server.js",
+    "dev": "concurrently \"node index.js\" \"node api-server.js\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ngrok/ngrok": "^1.7.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "multer": "^2.1.1",
+    "node-notifier": "^10.0.1",
+    "playwright": "^1.59.1",
+    "xlsx": "^0.18.5"
+  }
+}
