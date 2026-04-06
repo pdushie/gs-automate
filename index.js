@@ -155,8 +155,8 @@ async function login(page) {
         timeout: 60000
       });
 
-      //await page.screenshot({ path: 'login-debug.png', fullPage: true });
-      //console.log('📸 Screenshot saved — login-debug.png');
+      await page.screenshot({ path: 'login-debug.png', fullPage: true });
+      console.log('📸 Screenshot saved — login-debug.png');
 
       await page.waitForSelector('#disclaimer-btn', { timeout: 30000 });
       await page.waitForTimeout(500);
