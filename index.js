@@ -180,7 +180,7 @@ async function login(page) {
       // Set up the navigation waiter BEFORE clicking to avoid the race condition
       // where navigation completes before waitForNavigation is registered.
       const navigationPromise = page.waitForURL(
-        url => !url.includes('/account/verify-otp') && !url.includes('/account/login'),
+        url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
         { timeout: 30000, waitUntil: 'networkidle' }
       );
       await page.dispatchEvent('#login-btn', 'click');
