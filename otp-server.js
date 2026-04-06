@@ -26,13 +26,24 @@ app.post('/otp', (req, res) => {
     return res.status(400).json({ error: 'Empty payload' });
   }
 
-  const match = message.match(/\b\d{6,8}\b/);
-  if (!match) {
-    console.log('⚠️  No OTP found in message:', message);
-    return res.status(400).json({ error: 'No OTP found in message' });
+  // Only process messages that are actually MTN OTP messages
+  const isMtnOtp = /MTN/i.test(message) && /OTP/i.test(message);
+  if (!isMtnOtp) {
+    console.log('⚠️  Ignored — not an MTN OTP message:', message);
+    return res.status(200).json({ received: true, note: 'Not an MTN OTP message — ignored' });
   }
 
-  const otp = match[0];
+  // Extract OTP Code value specifically (e.g. "OTP Code: 41764126")
+  let match = message.match(/OTP\s*Code[:\s]+(\d{6,8})/i);
+  // Fallback: any standalone 6-8 digit number in the message
+  if (!match) match = message.match(/\b(\d{6,8})\b/);
+
+  if (!match) {
+    console.log('⚠️  MTN OTP message received but no OTP digits found:', message);
+    return res.status(400).json({ error: 'No OTP digits found in message' });
+  }
+
+  const otp = match[1];
   console.log(`✅ OTP extracted: ${otp}`);
 
   if (otpResolve) {
