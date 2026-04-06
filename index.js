@@ -292,10 +292,11 @@ async function uploadFile(page, excelFile) {
   console.log(`✅ Group name: ${fileName}`);
 
   await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
+  const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 60000 });
   await page.click('button.k-upload-selected');
   console.log('✅ Upload clicked');
 
-  await page.waitForURL('**/beneficiaries**', { timeout: 30000 });
+  await beneficiariesNavPromise;
   console.log('✅ Beneficiaries page loaded');
 
   await page.waitForSelector('#uploadList', { timeout: 10000 });
@@ -304,10 +305,11 @@ async function uploadFile(page, excelFile) {
 
   await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 10000 });
   await page.waitForTimeout(500);
+  const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 30000 });
   await page.click('.uk-button-primary:has-text("Ok")');
   console.log('✅ Confirmation accepted');
 
-  await page.waitForURL('**/upload/upload-status', { timeout: 15000 });
+  await statusNavPromise;
   console.log('✅ Status page loaded — polling for DONE...');
 
   updateStatusLog({ [excelFile.name]: 'PROCESSING' });
