@@ -142,74 +142,87 @@ async function isSessionActive(page) {
 }
 
 async function login(page) {
-  let attempts = 0;
-  const maxLoginAttempts = 3;
+  const maxSubmitAttempts = 3;
 
-  while (attempts < maxLoginAttempts) {
-    attempts++;
-    console.log(`\n🔐 Login attempt ${attempts}/${maxLoginAttempts}...`);
+  try {
+    // ── Phase 1: Submit credentials ONCE to get to the OTP page ──────────
+    await page.goto('https://up2u.mtn.com.gh/account/login', {
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
+    });
 
-    try {
-      await page.goto('https://up2u.mtn.com.gh/account/login', {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000
-      });
+    await page.screenshot({ path: 'login-debug.png', fullPage: true });
+    console.log('📸 Screenshot saved — login-debug.png');
 
-      await page.screenshot({ path: 'login-debug.png', fullPage: true });
-      console.log('📸 Screenshot saved — login-debug.png');
+    if (page.url().includes('/account/verify-otp')) {
+      console.log('✅ Already on OTP page — skipping credential submission');
+    } else {
+      await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
+      await page.waitForTimeout(5000);
+      await page.dispatchEvent('#disclaimer-btn', 'click');
+      console.log('✅ Disclaimer accepted');
 
-      if (page.url().includes('/account/verify-otp')) {
-        // Portal already has an active OTP challenge from a previous attempt —
-        // credentials were accepted, just need to supply the OTP
-        console.log('✅ Already on OTP page — skipping login form');
-      } else {
-        await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
-        await page.waitForTimeout(5000);
-        await page.dispatchEvent('#disclaimer-btn', 'click');
-        console.log('✅ Disclaimer accepted');
-
-        await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
-        await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
-        await page.fill('input[name="Pin"]', process.env.MTN_PIN);
-        await page.dispatchEvent('#login-btn', 'click');
-        console.log('🚀 Login clicked');
-
-        await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
-      }
-      console.log('✅ OTP page — waiting for SMS...');
-
-      resetOtpState(); // clear any lingering state from a previous attempt
-      const otp = await waitForOTP(180000); // 3 minutes
-      console.log(`✅ OTP received: ${otp}`);
-      await page.fill('input[name="OTPCode"]', otp);
-
-      // Set up the navigation waiter BEFORE clicking to avoid the race condition
-      // where navigation completes before waitForNavigation is registered.
-      const navigationPromise = page.waitForURL(
-        url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
-        { timeout: 60000, waitUntil: 'networkidle' }
-      );
+      await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
+      await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
+      await page.fill('input[name="Pin"]', process.env.MTN_PIN);
       await page.dispatchEvent('#login-btn', 'click');
-      await navigationPromise;
+      console.log('🚀 Login clicked');
 
-      if (await isSessionActive(page)) {
-        console.log('🎉 Login successful:', page.url());
-        return true;
-      } else {
-        console.warn('⚠️  Login seemed to succeed but session not active — retrying...');
-      }
+      await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
+    }
 
-    } catch (err) {
-      console.error(`❌ Login attempt ${attempts} failed:`, err.message);
-      if (attempts < maxLoginAttempts) {
-        console.log('⏳ Waiting 10s before retry...');
-        await page.waitForTimeout(10000);
+    // ── Phase 2: Wait for OTP once — do NOT reset state between retries ──
+    // waitForOTP checks the buffer first in case the OTP already arrived.
+    // Timeout is long enough to cover all submission retries without re-requesting.
+    console.log('\n✅ On OTP page — waiting for SMS (up to 10 mins)...');
+    const otp = await waitForOTP(10 * 60 * 1000);
+    console.log(`✅ OTP received: ${otp}`);
+
+    // ── Phase 3: Submit OTP — retry without navigating or refreshing ──────
+    for (let attempt = 1; attempt <= maxSubmitAttempts; attempt++) {
+      console.log(`\n🔑 OTP submit attempt ${attempt}/${maxSubmitAttempts}...`);
+      try {
+        // If a previous submission attempt navigated away, return to the OTP
+        // page WITHOUT refreshing (a refresh would trigger a new OTP request)
+        if (!page.url().includes('/account/verify-otp')) {
+          console.log('↩️  Navigating back to OTP page (no refresh)...');
+          await page.goto('https://up2u.mtn.com.gh/account/verify-otp', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000
+          });
+        }
+
+        await page.fill('input[name="OTPCode"]', otp);
+
+        const navigationPromise = page.waitForURL(
+          url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
+          { timeout: 60000, waitUntil: 'networkidle' }
+        );
+        await page.dispatchEvent('#login-btn', 'click');
+        await navigationPromise;
+
+        if (await isSessionActive(page)) {
+          console.log('🎉 Login successful:', page.url());
+          return true;
+        }
+        console.warn('⚠️  Session not active after OTP submit — retrying...');
+      } catch (submitErr) {
+        console.error(`❌ OTP submit attempt ${attempt} failed: ${submitErr.message}`);
+        if (attempt < maxSubmitAttempts) {
+          console.log('⏳ Waiting 5s before retry...');
+          await page.waitForTimeout(5000);
+        }
       }
     }
+
+  } catch (err) {
+    console.error('❌ Login failed:', err.message);
+    sendAlert('❌ MTN GroupShare — Login Failed', err.message);
+    throw err;
   }
 
-  sendAlert('❌ MTN GroupShare — Login Failed', `Failed to log in after ${maxLoginAttempts} attempts. Please check credentials.`);
-  throw new Error(`Login failed after ${maxLoginAttempts} attempts`);
+  sendAlert('❌ MTN GroupShare — Login Failed', `OTP was received but login could not be completed after ${maxSubmitAttempts} submission attempts.`);
+  throw new Error(`Login failed — OTP submission unsuccessful after ${maxSubmitAttempts} attempts`);
 }
 
 async function checkBalance(page) {
