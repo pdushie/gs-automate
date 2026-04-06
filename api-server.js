@@ -301,15 +301,53 @@ app.get('/balance', async (req, res) => {
     }
   }
 
-  // Bot did not respond in time (likely busy uploading) — return cached value
+  // Bot did not respond in time — clear the stale flag and return cached value with context
+  withFileLock(STATUS_LOG, () => {
+    const s = loadStatusLog();
+    if (s._balanceRefreshRequested) {
+      saveStatusLog({ ...s, _balanceRefreshRequested: false });
+    }
+  });
+
   const final = loadStatusLog();
+
+  // Work out what the bot is currently doing
+  const uploaded = loadUploadedLog();
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  let busyFile = null;
+  let busyStatus = null;
+  try {
+    const files = fs.readdirSync(folderPath).filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
+    for (const f of files) {
+      const st = uploaded.includes(f) ? 'DONE' : (final[f] || 'PENDING');
+      if (st === 'IN_PROGRESS' || st === 'PROCESSING') {
+        busyFile = f;
+        busyStatus = st;
+        break;
+      }
+    }
+  } catch {}
+
+  // Human-readable age of cached reading
+  let cacheAge = null;
+  if (final._lastBalanceCheckedAt) {
+    const ageMs = Date.now() - new Date(final._lastBalanceCheckedAt).getTime();
+    const ageMins = Math.round(ageMs / 60000);
+    cacheAge = ageMins < 1 ? 'less than a minute ago' : `${ageMins} minute${ageMins === 1 ? '' : 's'} ago`;
+  }
+
+  const note = busyFile
+    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Cached value is from ${cacheAge || 'an earlier check'}.`
+    : `Bot did not respond within 25 s. Cached value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
+
   return res.json({
     success: true,
     balance: final._lastBalance || 'Unknown',
     balanceMB: final._lastBalanceMB || 0,
     checkedAt: final._lastBalanceCheckedAt || null,
+    cacheAge,
     fresh: false,
-    note: 'Bot is busy — cached value returned. Try again shortly.',
+    note,
   });
 });
 
