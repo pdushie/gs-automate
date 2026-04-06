@@ -158,18 +158,24 @@ async function login(page) {
       await page.screenshot({ path: 'login-debug.png', fullPage: true });
       console.log('📸 Screenshot saved — login-debug.png');
 
-      await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
-      await page.waitForTimeout(500);
-      await page.dispatchEvent('#disclaimer-btn', 'click');
-      console.log('✅ Disclaimer accepted');
+      if (page.url().includes('/account/verify-otp')) {
+        // Portal already has an active OTP challenge from a previous attempt —
+        // credentials were accepted, just need to supply the OTP
+        console.log('✅ Already on OTP page — skipping login form');
+      } else {
+        await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
+        await page.waitForTimeout(5000);
+        await page.dispatchEvent('#disclaimer-btn', 'click');
+        console.log('✅ Disclaimer accepted');
 
-      await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
-      await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
-      await page.fill('input[name="Pin"]', process.env.MTN_PIN);
-      await page.dispatchEvent('#login-btn', 'click');
-      console.log('🚀 Login clicked');
+        await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
+        await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
+        await page.fill('input[name="Pin"]', process.env.MTN_PIN);
+        await page.dispatchEvent('#login-btn', 'click');
+        console.log('🚀 Login clicked');
 
-      await page.waitForURL('**/account/verify-otp', { timeout: 30000 });
+        await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
+      }
       console.log('✅ OTP page — waiting for SMS...');
 
       resetOtpState(); // clear any lingering state from a previous attempt
