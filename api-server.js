@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
+const { withFileLock, atomicWrite } = require('./lock');
 
 
 const app = express();
@@ -52,19 +53,32 @@ const upload = multer({
 
 
 function loadUploadedLog() {
-  if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+  try {
+    if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+  } catch {
+    try {
+      if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+    } catch {}
+  }
   return [];
 }
 
 
 function loadStatusLog() {
-  if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+  try {
+    if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+  } catch {
+    try {
+      if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+    } catch {}
+  }
   return {};
 }
 
 
+// Atomic write — always called from within a withFileLock block
 function saveStatusLog(statusLog) {
-  fs.writeFileSync(STATUS_LOG, JSON.stringify(statusLog, null, 2));
+  atomicWrite(STATUS_LOG, JSON.stringify(statusLog, null, 2));
 }
 
 
@@ -132,21 +146,28 @@ function cleanupOldFiles() {
 
       if (ageMs >= retentionMs) {
         fs.unlinkSync(filePath);
-
-        // Clean up all status log entries for this file
-        delete statusLog[file];
-        delete statusLog[file + '_queuedAt'];
-        delete statusLog[file + '_completedAt'];
-
         deletedFiles.push({ filename: file, ageHours });
         deleted++;
         console.log(`🗑️  Cleaned up: ${file} (age: ${ageHours}h)`);
       }
     }
 
-    // Persist updated status log if anything was deleted
+    // Persist updated status log if anything was deleted.
+    // Re-read inside the lock to pick up any bot writes that happened during the loop.
     if (deleted > 0) {
-      saveStatusLog(statusLog);
+      withFileLock(STATUS_LOG, () => {
+        const freshLog = loadStatusLog();
+        for (const { filename } of deletedFiles) {
+          delete freshLog[filename];
+          delete freshLog[filename + '_queuedAt'];
+          delete freshLog[filename + '_completedAt'];
+          delete freshLog[filename + '_startedAt'];
+          delete freshLog[filename + '_timedOutAt'];
+          delete freshLog[filename + '_retryCount'];
+          delete freshLog[filename + '_failedAt'];
+        }
+        saveStatusLog(freshLog);
+      });
       console.log(`✅ Cleanup complete — deleted: ${deleted}, skipped (pending): ${skipped}`);
     } else {
       console.log(`🧹 Cleanup ran — nothing to delete, skipped (pending): ${skipped}`);
@@ -258,8 +279,10 @@ app.get('/balance', async (req, res) => {
   const requestedAt = Date.now();
 
   // Signal the bot to do an immediate balance check
-  const statusLog = loadStatusLog();
-  saveStatusLog({ ...statusLog, _balanceRefreshRequested: true });
+  withFileLock(STATUS_LOG, () => {
+    const statusLog = loadStatusLog();
+    saveStatusLog({ ...statusLog, _balanceRefreshRequested: true });
+  });
 
   // Wait up to 25s for the bot to clear the flag and write a fresh reading
   const deadline = Date.now() + 25000;

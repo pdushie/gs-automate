@@ -1,5 +1,6 @@
 const { chromium } = require('playwright');
 const { waitForOTP, startServer, resetOtpState } = require('./otp-server');
+const { withFileLock, atomicWrite } = require('./lock');
 const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
@@ -12,14 +13,23 @@ const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json
 const MAX_FILE_RETRIES = 3;
 
 function loadStatusLog() {
-  if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+  try {
+    if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+  } catch {
+    // Retry once — may have caught the file mid-rename during an atomic write
+    try {
+      if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+    } catch {}
+  }
   return {};
 }
 
 function updateStatusLog(updates) {
-  const log = loadStatusLog();
-  Object.assign(log, updates);
-  fs.writeFileSync(STATUS_LOG, JSON.stringify(log, null, 2));
+  withFileLock(STATUS_LOG, () => {
+    const log = loadStatusLog();
+    Object.assign(log, updates);
+    atomicWrite(STATUS_LOG, JSON.stringify(log, null, 2));
+  });
 }
 
 function sendAlert(title, message) {
@@ -40,19 +50,25 @@ async function interruptibleSleep(ms, checkIntervalMs = 15000) {
 }
 
 function loadUploadedLog() {
-  if (fs.existsSync(UPLOADED_LOG)) {
-    return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+  try {
+    if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+  } catch {
+    try {
+      if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+    } catch {}
   }
   return [];
 }
 
 function markAsUploaded(fileName) {
-  const log = loadUploadedLog();
-  if (!log.includes(fileName)) {
-    log.push(fileName);
-    fs.writeFileSync(UPLOADED_LOG, JSON.stringify(log, null, 2));
-    console.log(`📝 Marked as uploaded: ${fileName}`);
-  }
+  withFileLock(UPLOADED_LOG, () => {
+    const log = loadUploadedLog();
+    if (!log.includes(fileName)) {
+      log.push(fileName);
+      atomicWrite(UPLOADED_LOG, JSON.stringify(log, null, 2));
+      console.log(`📝 Marked as uploaded: ${fileName}`);
+    }
+  });
 }
 
 function getPendingFiles(folderPath) {
