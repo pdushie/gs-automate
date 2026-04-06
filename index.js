@@ -176,9 +176,15 @@ async function login(page) {
       const otp = await waitForOTP(180000); // 3 minutes
       console.log(`✅ OTP received: ${otp}`);
       await page.fill('input[name="OTPCode"]', otp);
-      await page.dispatchEvent('#login-btn', 'click');
 
-      await page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
+      // Set up the navigation waiter BEFORE clicking to avoid the race condition
+      // where navigation completes before waitForNavigation is registered.
+      const navigationPromise = page.waitForURL(
+        url => !url.includes('/account/verify-otp') && !url.includes('/account/login'),
+        { timeout: 30000, waitUntil: 'networkidle' }
+      );
+      await page.dispatchEvent('#login-btn', 'click');
+      await navigationPromise;
 
       if (await isSessionActive(page)) {
         console.log('🎉 Login successful:', page.url());
