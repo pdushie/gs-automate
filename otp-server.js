@@ -7,6 +7,7 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 let otpResolve = null;
+let otpTimer = null;
 
 // ── OTP RECEIVER ───────────────────────────────────────────
 app.post('/otp', (req, res) => {
@@ -55,15 +56,28 @@ app.get('/', (req, res) => {
 });
 
 // ── WAIT FOR OTP ───────────────────────────────────────────
+function resetOtpState() {
+  if (otpTimer) {
+    clearTimeout(otpTimer);
+    otpTimer = null;
+  }
+  otpResolve = null;
+}
+
 function waitForOTP(timeoutMs = 180000) {
+  // Clear any lingering state from a previous timed-out or failed call
+  resetOtpState();
+
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    otpTimer = setTimeout(() => {
       otpResolve = null;
+      otpTimer = null;
       reject(new Error('OTP timeout — no OTP received within the timeout period'));
     }, timeoutMs);
 
     otpResolve = (otp) => {
-      clearTimeout(timer);
+      clearTimeout(otpTimer);
+      otpTimer = null;
       resolve(otp);
     };
   });
@@ -131,4 +145,4 @@ const PORT = process.env.OTP_PORT || 6060;
   }
 }
 
-module.exports = { waitForOTP, startServer };
+module.exports = { waitForOTP, startServer, resetOtpState };

@@ -15,26 +15,40 @@ api.on('exit', (code) => {
 });
 
 // Bot uses OTP_PORT internally — not exposed to the internet
-const bot = spawn('node', ['index.js'], {
-  stdio: 'inherit',
-  env: { ...process.env, PORT: process.env.OTP_PORT || '6060' }  // already correct
-});
+let currentBot = null;
+let botRestartCount = 0;
+let shuttingDown = false;
 
-bot.on('exit', (code) => {
-  console.log(`⚠️  Bot exited with code ${code}`);
-});
+function spawnBot() {
+  currentBot = spawn('node', ['index.js'], {
+    stdio: 'inherit',
+    env: { ...process.env, PORT: process.env.OTP_PORT || '6060' }
+  });
+
+  currentBot.on('exit', (code) => {
+    if (shuttingDown) return;
+    botRestartCount++;
+    const delay = Math.min(5000 * botRestartCount, 30000);
+    console.log(`⚠️  Bot exited (code ${code}). Restart #${botRestartCount} in ${delay / 1000}s...`);
+    setTimeout(spawnBot, delay);
+  });
+}
+
+spawnBot();
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
+  shuttingDown = true;
   console.log('🛑 SIGTERM received — shutting down...');
   api.kill();
-  bot.kill();
+  if (currentBot) currentBot.kill();
   process.exit(0);
 });
 
 process.on('SIGINT', () => {
+  shuttingDown = true;
   console.log('🛑 SIGINT received — shutting down...');
   api.kill();
-  bot.kill();
+  if (currentBot) currentBot.kill();
   process.exit(0);
 });

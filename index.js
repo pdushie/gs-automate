@@ -1,5 +1,5 @@
 const { chromium } = require('playwright');
-const { waitForOTP, startServer } = require('./otp-server');
+const { waitForOTP, startServer, resetOtpState } = require('./otp-server');
 const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
@@ -9,6 +9,7 @@ require('dotenv').config();
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+const MAX_FILE_RETRIES = 3;
 
 function loadStatusLog() {
   if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
@@ -47,8 +48,14 @@ function getPendingFiles(folderPath) {
   if (!fs.existsSync(folderPath)) throw new Error(`Folder not found: ${folderPath}`);
 
   const uploaded = loadUploadedLog();
+  const statusLog = loadStatusLog();
   const files = fs.readdirSync(folderPath)
-    .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !uploaded.includes(f))
+    .filter(f => {
+      if (!f.endsWith('.xlsx') && !f.endsWith('.xls')) return false;
+      if (uploaded.includes(f)) return false;
+      if (statusLog[f] === 'ABANDONED') return false;
+      return true;
+    })
     .map(f => ({
       name: f,
       fullPath: path.join(folderPath, f),
@@ -137,6 +144,7 @@ async function login(page) {
       await page.waitForURL('**/account/verify-otp', { timeout: 15000 });
       console.log('✅ OTP page — waiting for SMS...');
 
+      resetOtpState(); // clear any lingering state from a previous attempt
       const otp = await waitForOTP(180000); // 3 minutes
       console.log(`✅ OTP received: ${otp}`);
       await page.fill('input[name="OTPCode"]', otp);
@@ -166,6 +174,8 @@ async function login(page) {
 
 async function checkBalance(page) {
   console.log('\n💰 Checking data balance...');
+  await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
   await page.waitForTimeout(2000);
 
@@ -225,6 +235,20 @@ async function uploadFile(page, excelFile) {
 
   await page.goto('https://up2u.mtn.com.gh/upload/upload-beneficiaries', { waitUntil: 'networkidle' });
 
+  // Check if a previous upload is still processing — MTN blocks new uploads in this case
+  const isBlocked = await page.evaluate(() => {
+    const spans = Array.from(document.querySelectorAll('span[uk-icon*="ban"], span.uk-icon'));
+    if (spans.some(el => el.getAttribute('uk-icon') && el.getAttribute('uk-icon').includes('ban'))) return true;
+    const allText = document.body.innerText || '';
+    return allText.includes('You cannot upload file until the last upload is done processing');
+  });
+
+  if (isBlocked) {
+    console.warn('⏳ Upload blocked: a previous upload is still processing on MTN\'s end. Will retry later.');
+    updateStatusLog({ [excelFile.name]: 'PENDING' });
+    return { blocked: true };
+  }
+
   await page.waitForSelector('input[name="files"]', { timeout: 10000 });
   await page.setInputFiles('input[name="files"]', excelFile.fullPath);
   console.log('✅ File selected');
@@ -257,6 +281,7 @@ async function uploadFile(page, excelFile) {
   const maxAttempts = 70;
   const pollInterval = 30000;
   let isDone = false;
+  let isFailed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await page.reload({ waitUntil: 'networkidle' });
@@ -295,21 +320,53 @@ async function uploadFile(page, excelFile) {
       break;
     }
 
+    if (status && /fail/i.test(status)) {
+      isFailed = true;
+      updateStatusLog({
+        [excelFile.name]: 'FAILED',
+        [`${excelFile.name}_failedAt`]: new Date().toISOString(),
+      });
+      sendAlert(
+        '❌ MTN GroupShare — Upload Failed',
+        `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`
+      );
+      await page.screenshot({ path: `failed-${fileName}.png` });
+      console.error(`❌ ${excelFile.name} — FAILED on MTN's end`);
+      break;
+    }
+
     if (attempt < maxAttempts) await page.waitForTimeout(pollInterval);
   }
 
-  if (!isDone) {
-    updateStatusLog({
-      [excelFile.name]: 'TIMEOUT',
-      [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
-    });
+  if (!isDone && !isFailed) {
+    const currentStatus = loadStatusLog();
+    const retryCount = (currentStatus[`${excelFile.name}_retryCount`] || 0) + 1;
 
-    console.warn(`⚠️  Timed out: ${excelFile.name} — will retry next run`);
-    sendAlert(
-      '⚠️ MTN GroupShare — Processing Timeout',
-      `"${excelFile.name}" did not reach DONE within 35 minutes. Please check the portal manually.`
-    );
-    await page.screenshot({ path: `timeout-${fileName}.png` });
+    if (retryCount >= MAX_FILE_RETRIES) {
+      updateStatusLog({
+        [excelFile.name]: 'ABANDONED',
+        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
+        [`${excelFile.name}_retryCount`]: retryCount,
+      });
+      console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} timeout(s)`);
+      sendAlert(
+        '🚫 MTN GroupShare — File Abandoned',
+        `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`
+      );
+      await page.screenshot({ path: `abandoned-${fileName}.png` });
+    } else {
+      updateStatusLog({
+        [excelFile.name]: 'TIMEOUT',
+        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
+        [`${excelFile.name}_retryCount`]: retryCount,
+      });
+      console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — will retry next run`);
+      sendAlert(
+        '⚠️ MTN GroupShare — Processing Timeout',
+        `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`
+      );
+      await page.screenshot({ path: `timeout-${fileName}.png` });
+    }
   }
 
   return isDone;
@@ -408,7 +465,11 @@ async function run() {
         }
 
         console.log(`✅ Balance sufficient — proceeding...`);
-        await uploadFile(page, pendingFiles[i]);
+        const uploadResult = await uploadFile(page, pendingFiles[i]);
+        if (uploadResult && uploadResult.blocked) {
+          console.warn('⏳ MTN is still processing a previous upload. Stopping batch — will retry all pending files next scan.');
+          break;
+        }
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);
