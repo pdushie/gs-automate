@@ -158,18 +158,18 @@ async function login(page) {
       await page.screenshot({ path: 'login-debug.png', fullPage: true });
       console.log('📸 Screenshot saved — login-debug.png');
 
-      await page.waitForSelector('#disclaimer-btn', { timeout: 30000 });
+      await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
       await page.waitForTimeout(500);
       await page.dispatchEvent('#disclaimer-btn', 'click');
       console.log('✅ Disclaimer accepted');
 
-      await page.waitForSelector('input[name="Msisdn"]', { timeout: 10000 });
+      await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
       await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
       await page.fill('input[name="Pin"]', process.env.MTN_PIN);
       await page.dispatchEvent('#login-btn', 'click');
       console.log('🚀 Login clicked');
 
-      await page.waitForURL('**/account/verify-otp', { timeout: 15000 });
+      await page.waitForURL('**/account/verify-otp', { timeout: 30000 });
       console.log('✅ OTP page — waiting for SMS...');
 
       resetOtpState(); // clear any lingering state from a previous attempt
@@ -181,7 +181,7 @@ async function login(page) {
       // where navigation completes before waitForNavigation is registered.
       const navigationPromise = page.waitForURL(
         url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
-        { timeout: 30000, waitUntil: 'networkidle' }
+        { timeout: 60000, waitUntil: 'networkidle' }
       );
       await page.dispatchEvent('#login-btn', 'click');
       await navigationPromise;
