@@ -60,12 +60,27 @@ function getPendingFiles(folderPath) {
 }
 
 function parseBalanceToMB(balanceText) {
+  if (!balanceText || balanceText === 'Unknown') return 0;
+
   let totalMB = 0;
-  const gbMatch = balanceText.match(/([\d.]+)\s*GB/i);
-  const mbMatch = balanceText.match(/([\d.]+)\s*MB/i);
-  if (gbMatch) totalMB += parseFloat(gbMatch[1]) * 1024;
-  if (mbMatch) totalMB += parseFloat(mbMatch[1]);
-  return totalMB;
+
+  const units = {
+    TB: 1024 * 1024,
+    GB: 1024,
+    MB: 1,
+    KB: 1 / 1024,
+  };
+
+  const regex = /([\d,]+\.?\d*)\s*(TB|GB|MB|KB)/gi;
+  let match;
+
+  while ((match = regex.exec(balanceText)) !== null) {
+    const value = parseFloat(match[1].replace(/,/g, ''));
+    const unit = match[2].toUpperCase();
+    totalMB += value * (units[unit] || 0);
+  }
+
+  return Math.round(totalMB);
 }
 
 async function isSessionActive(page) {
