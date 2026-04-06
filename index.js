@@ -291,26 +291,53 @@ async function uploadFile(page, excelFile) {
   await page.fill('#groupId', fileName);
   console.log(`✅ Group name: ${fileName}`);
 
-  await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
-  const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 60000 });
-  await page.click('button.k-upload-selected');
-  console.log('✅ Upload clicked');
+  try {
+    await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
+    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 60000 });
+    await page.click('button.k-upload-selected');
+    console.log('✅ Upload clicked');
 
-  await beneficiariesNavPromise;
-  console.log('✅ Beneficiaries page loaded');
+    await beneficiariesNavPromise;
+    console.log('✅ Beneficiaries page loaded');
 
-  await page.waitForSelector('#uploadList', { timeout: 10000 });
-  await page.click('#uploadList');
-  console.log('✅ Share clicked');
+    await page.waitForSelector('#uploadList', { timeout: 10000 });
+    await page.click('#uploadList');
+    console.log('✅ Share clicked');
 
-  await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 10000 });
-  await page.waitForTimeout(500);
-  const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 30000 });
-  await page.click('.uk-button-primary:has-text("Ok")');
-  console.log('✅ Confirmation accepted');
+    await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 10000 });
+    await page.waitForTimeout(500);
+    const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 30000 });
+    await page.click('.uk-button-primary:has-text("Ok")');
+    console.log('✅ Confirmation accepted');
 
-  await statusNavPromise;
-  console.log('✅ Status page loaded — polling for DONE...');
+    await statusNavPromise;
+    console.log('✅ Status page loaded — polling for DONE...');
+  } catch (navErr) {
+    console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
+    await page.screenshot({ path: `nav-error-${fileName}.png` });
+
+    const currentStatus = loadStatusLog();
+    const retryCount = (currentStatus[`${excelFile.name}_retryCount`] || 0) + 1;
+
+    if (retryCount >= MAX_FILE_RETRIES) {
+      updateStatusLog({
+        [excelFile.name]: 'ABANDONED',
+        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
+        [`${excelFile.name}_retryCount`]: retryCount,
+      });
+      sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+      console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
+    } else {
+      updateStatusLog({
+        [excelFile.name]: 'TIMEOUT',
+        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
+        [`${excelFile.name}_retryCount`]: retryCount,
+      });
+      sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+      console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), will retry`);
+    }
+    return { error: true };
+  }
 
   updateStatusLog({ [excelFile.name]: 'PROCESSING' });
 
@@ -518,6 +545,10 @@ async function run() {
         if (uploadResult && uploadResult.blocked) {
           console.warn('⏳ MTN is still processing a previous upload. Stopping batch — will retry all pending files next scan.');
           break;
+        }
+        if (uploadResult && uploadResult.error) {
+          console.warn('⚠️ Upload navigation error — skipping to next file.');
+          continue;
         }
       }
 
