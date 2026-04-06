@@ -253,14 +253,40 @@ app.get('/status/:filename', (req, res) => {
 });
 
 
-// GET /balance — get current data balance
-app.get('/balance', (req, res) => {
+// GET /balance — trigger a live balance refresh and return the result
+app.get('/balance', async (req, res) => {
+  const requestedAt = Date.now();
+
+  // Signal the bot to do an immediate balance check
   const statusLog = loadStatusLog();
-  res.json({
+  saveStatusLog({ ...statusLog, _balanceRefreshRequested: true });
+
+  // Wait up to 25s for the bot to clear the flag and write a fresh reading
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1000));
+    const updated = loadStatusLog();
+    const checkedAt = updated._lastBalanceCheckedAt;
+    if (!updated._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
+      return res.json({
+        success: true,
+        balance: updated._lastBalance || 'Unknown',
+        balanceMB: updated._lastBalanceMB || 0,
+        checkedAt: updated._lastBalanceCheckedAt,
+        fresh: true,
+      });
+    }
+  }
+
+  // Bot did not respond in time (likely busy uploading) — return cached value
+  const final = loadStatusLog();
+  return res.json({
     success: true,
-    balance: statusLog['_lastBalance'] || 'Unknown',
-    balanceMB: statusLog['_lastBalanceMB'] || 0,
-    checkedAt: statusLog['_lastBalanceCheckedAt'] || null,
+    balance: final._lastBalance || 'Unknown',
+    balanceMB: final._lastBalanceMB || 0,
+    checkedAt: final._lastBalanceCheckedAt || null,
+    fresh: false,
+    note: 'Bot is busy — cached value returned. Try again shortly.',
   });
 });
 

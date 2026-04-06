@@ -27,6 +27,18 @@ function sendAlert(title, message) {
   notifier.notify({ title, message, sound: true, wait: false });
 }
 
+// Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh request.
+// Returns true if woken early by the flag, false if the full duration elapsed.
+async function interruptibleSleep(ms, checkIntervalMs = 15000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    const remaining = end - Date.now();
+    await new Promise(r => setTimeout(r, Math.min(checkIntervalMs, remaining)));
+    if (loadStatusLog()._balanceRefreshRequested) return true;
+  }
+  return false;
+}
+
 function loadUploadedLog() {
   if (fs.existsSync(UPLOADED_LOG)) {
     return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
@@ -127,8 +139,8 @@ async function login(page) {
         timeout: 60000
       });
 
-      await page.screenshot({ path: 'login-debug.png', fullPage: true });
-      console.log('📸 Screenshot saved — login-debug.png');
+      //await page.screenshot({ path: 'login-debug.png', fullPage: true });
+      //console.log('📸 Screenshot saved — login-debug.png');
 
       await page.waitForSelector('#disclaimer-btn', { timeout: 30000 });
       await page.waitForTimeout(500);
@@ -427,13 +439,26 @@ async function run() {
         await login(page);
       }
 
+      // Service any immediate balance refresh requested by the GET /balance API endpoint
+      let freshBalanceJustFetched = false;
+      if (loadStatusLog()._balanceRefreshRequested) {
+        console.log('💰 Balance refresh requested via API — refreshing now...');
+        updateStatusLog({ _balanceRefreshRequested: false });
+        await checkBalance(page);
+        freshBalanceJustFetched = true;
+      }
+
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
 
       if (pendingFiles.length === 0) {
         idleCount++;
-        const { balanceText, totalMB } = await checkBalance(page);
-        console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 3 mins...`);
-        await page.waitForTimeout(IDLE_REFRESH_INTERVAL);
+        if (!freshBalanceJustFetched) {
+          const { balanceText, totalMB } = await checkBalance(page);
+          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 3 mins...`);
+        } else {
+          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Next check in 3 mins...`);
+        }
+        await interruptibleSleep(IDLE_REFRESH_INTERVAL);
         continue;
       }
 
@@ -473,7 +498,7 @@ async function run() {
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);
-      await page.waitForTimeout(IDLE_REFRESH_INTERVAL);
+      await interruptibleSleep(IDLE_REFRESH_INTERVAL);
     }
 
   } catch (err) {
