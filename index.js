@@ -316,6 +316,29 @@ async function uploadFile(page, excelFile) {
     console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
     await page.screenshot({ path: `nav-error-${fileName}.png` });
 
+    // Check if we're still on the upload page — indicates the portal rejected the upload
+    const currentUrl = page.url();
+    if (currentUrl.includes('upload-beneficiaries')) {
+      // Read whatever error text the portal is showing
+      const portalError = await page.evaluate(() => {
+        const el = document.querySelector('.k-notification-error, .uk-alert-danger, [class*="error"], [class*="alert"]');
+        return el ? el.innerText.trim() : document.body.innerText.trim().substring(0, 300);
+      });
+      console.warn(`⚠️ Portal is still on upload page. Page message: ${portalError}`);
+
+      // Duplicate group name — portal won't navigate because the group already exists
+      // meaning this file's data was already uploaded. Mark it as done.
+      markAsUploaded(excelFile.name);
+      updateStatusLog({
+        [excelFile.name]: 'DONE',
+        [`${excelFile.name}_completedAt`]: new Date().toISOString(),
+        [`${excelFile.name}_note`]: `Marked done — portal rejected upload (possible duplicate group name). Portal message: ${portalError}`,
+      });
+      console.log(`✅ ${excelFile.name} — marked as DONE (already uploaded / duplicate group name)`);
+      return true;
+    }
+
+    // Genuine navigation failure — apply retry / abandon logic
     const currentStatus = loadStatusLog();
     const retryCount = (currentStatus[`${excelFile.name}_retryCount`] || 0) + 1;
 
