@@ -21,6 +21,10 @@ services:
         sync: false
       - key: EXCEL_FOLDER_PATH
         value: /data/upload_files
+      - key: FILE_RETENTION_HOURS
+        value: "24"
+      - key: DISK_LIMIT_MB
+        value: "900"
     healthCheckPath: /health
     disk:
       name: groupshare-data

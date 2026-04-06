@@ -5,12 +5,16 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config();
 
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
+
 
 // Auto-create upload folder if it doesn't exist
 const uploadFolder = process.env.EXCEL_FOLDER_PATH;
@@ -18,6 +22,7 @@ if (uploadFolder && !fs.existsSync(uploadFolder)) {
   fs.mkdirSync(uploadFolder, { recursive: true });
   console.log(`📁 Created upload folder: ${uploadFolder}`);
 }
+
 
 // Save uploaded files directly into the watch folder
 const storage = multer.diskStorage({
@@ -30,6 +35,7 @@ const storage = multer.diskStorage({
   }
 });
 
+
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
@@ -41,17 +47,121 @@ const upload = multer({
   }
 });
 
+
+// ── HELPERS ───────────────────────────────────────────────
+
+
 function loadUploadedLog() {
   if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
   return [];
 }
+
 
 function loadStatusLog() {
   if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
   return {};
 }
 
+
+function saveStatusLog(statusLog) {
+  fs.writeFileSync(STATUS_LOG, JSON.stringify(statusLog, null, 2));
+}
+
+
+function getDiskUsage() {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  try {
+    const files = fs.readdirSync(folderPath);
+    let totalBytes = 0;
+    let fileCount = 0;
+
+    for (const file of files) {
+      if (file.startsWith('.')) continue; // skip hidden log files
+      const filePath = path.join(folderPath, file);
+      const stat = fs.statSync(filePath);
+      if (stat.isFile()) {
+        totalBytes += stat.size;
+        fileCount++;
+      }
+    }
+
+    return {
+      totalBytes,
+      totalKB: Math.round(totalBytes / 1024),
+      totalMB: parseFloat((totalBytes / (1024 * 1024)).toFixed(2)),
+      fileCount,
+    };
+  } catch (err) {
+    return { totalBytes: 0, totalKB: 0, totalMB: 0, fileCount: 0 };
+  }
+}
+
+
+function cleanupOldFiles() {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  const uploaded = loadUploadedLog();
+  const statusLog = loadStatusLog();
+  const now = Date.now();
+  const retentionMs = RETENTION_HOURS * 60 * 60 * 1000;
+
+  let deleted = 0;
+  let skipped = 0;
+  const deletedFiles = [];
+
+  try {
+    const files = fs.readdirSync(folderPath)
+      .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
+
+    for (const file of files) {
+      const isDone = uploaded.includes(file) || statusLog[file] === 'DONE';
+
+      // Never delete files that are still PENDING or being processed
+      if (!isDone) {
+        skipped++;
+        continue;
+      }
+
+      const completedAt = statusLog[file + '_completedAt'];
+      const completedTime = completedAt ? new Date(completedAt).getTime() : null;
+
+      // Fall back to file modified time if completedAt is missing
+      const filePath = path.join(folderPath, file);
+      const fileMtime = fs.statSync(filePath).mtimeMs;
+      const ageMs = now - (completedTime || fileMtime);
+      const ageHours = Math.round(ageMs / 3600000);
+
+      if (ageMs >= retentionMs) {
+        fs.unlinkSync(filePath);
+
+        // Clean up all status log entries for this file
+        delete statusLog[file];
+        delete statusLog[file + '_queuedAt'];
+        delete statusLog[file + '_completedAt'];
+
+        deletedFiles.push({ filename: file, ageHours });
+        deleted++;
+        console.log(`🗑️  Cleaned up: ${file} (age: ${ageHours}h)`);
+      }
+    }
+
+    // Persist updated status log if anything was deleted
+    if (deleted > 0) {
+      saveStatusLog(statusLog);
+      console.log(`✅ Cleanup complete — deleted: ${deleted}, skipped (pending): ${skipped}`);
+    } else {
+      console.log(`🧹 Cleanup ran — nothing to delete, skipped (pending): ${skipped}`);
+    }
+
+    return { deleted, skipped, deletedFiles };
+  } catch (err) {
+    console.error('❌ Cleanup error:', err.message);
+    return { deleted: 0, skipped: 0, deletedFiles: [], error: err.message };
+  }
+}
+
+
 // ── ROUTES ────────────────────────────────────────────────
+
 
 // POST /upload — accept an Excel file from external app
 app.post('/upload', upload.single('file'), (req, res) => {
@@ -67,6 +177,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
     queuedAt: new Date().toISOString(),
   });
 });
+
 
 // POST /upload-base64 — accept Excel as base64 string
 app.post('/upload-base64', (req, res) => {
@@ -101,6 +212,7 @@ app.post('/upload-base64', (req, res) => {
   }
 });
 
+
 // GET /status — get status of all files
 app.get('/status', (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
@@ -118,6 +230,7 @@ app.get('/status', (req, res) => {
 
   res.json({ success: true, files: allFiles });
 });
+
 
 // GET /status/:filename — get status of a specific file
 app.get('/status/:filename', (req, res) => {
@@ -139,6 +252,7 @@ app.get('/status/:filename', (req, res) => {
   });
 });
 
+
 // GET /balance — get current data balance
 app.get('/balance', (req, res) => {
   const statusLog = loadStatusLog();
@@ -150,15 +264,71 @@ app.get('/balance', (req, res) => {
   });
 });
 
-// GET /health — simple health check
-app.get('/health', (req, res) => {
-  res.json({ success: true, status: 'running', time: new Date().toISOString() });
+
+// GET /disk — get current disk usage of the upload folder
+app.get('/disk', (req, res) => {
+  const usage = getDiskUsage();
+  const diskLimitMB = parseFloat(process.env.DISK_LIMIT_MB || '900'); // safe limit under 1GB
+  const usedPercent = parseFloat(((usage.totalMB / diskLimitMB) * 100).toFixed(1));
+
+  res.json({
+    success: true,
+    used: {
+      bytes: usage.totalBytes,
+      kb: usage.totalKB,
+      mb: usage.totalMB,
+    },
+    limit: {
+      mb: diskLimitMB,
+      gb: parseFloat((diskLimitMB / 1024).toFixed(2)),
+    },
+    usedPercent,
+    fileCount: usage.fileCount,
+    retentionHours: RETENTION_HOURS,
+    checkedAt: new Date().toISOString(),
+  });
 });
 
+
+// POST /cleanup — manually trigger file cleanup
+app.post('/cleanup', (req, res) => {
+  console.log('🧹 Manual cleanup triggered via API');
+  const result = cleanupOldFiles();
+  res.json({
+    success: true,
+    message: 'Cleanup complete',
+    retentionHours: RETENTION_HOURS,
+    ...result,
+  });
+});
+
+
+// GET /health — simple health check
+app.get('/health', (req, res) => {
+  const usage = getDiskUsage();
+  res.json({
+    success: true,
+    status: 'running',
+    time: new Date().toISOString(),
+    disk: {
+      usedMB: usage.totalMB,
+      fileCount: usage.fileCount,
+    },
+  });
+});
+
+
+// ── SCHEDULED CLEANUP ─────────────────────────────────────
+// Run on startup, then every hour
+console.log(`🧹 File retention set to ${RETENTION_HOURS} hours`);
+cleanupOldFiles();
+setInterval(cleanupOldFiles, 60 * 60 * 1000);
+
+
 // ── PORT BINDING ───────────────────────────────────────────
-// Use Render's injected PORT first, then API_PORT, then default 7070
 const API_PORT = process.env.PORT || process.env.API_PORT || 7070;
 const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${API_PORT}`;
+
 
 app.listen(API_PORT, () => {
   console.log(`🚀 API server running on port ${API_PORT}`);
@@ -168,7 +338,10 @@ app.listen(API_PORT, () => {
   console.log(`   GET  ${PUBLIC_URL}/status         — list all file statuses`);
   console.log(`   GET  ${PUBLIC_URL}/status/:file   — get specific file status`);
   console.log(`   GET  ${PUBLIC_URL}/balance        — get current data balance`);
+  console.log(`   GET  ${PUBLIC_URL}/disk           — get disk usage`);
+  console.log(`   POST ${PUBLIC_URL}/cleanup        — trigger manual cleanup`);
   console.log(`   GET  ${PUBLIC_URL}/health         — health check`);
 });
+
 
 module.exports = app;
