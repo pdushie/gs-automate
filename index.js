@@ -585,7 +585,15 @@ async function run() {
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
         sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired. Re-logging in automatically...');
-        await login(page);
+        try {
+          await login(page);
+        } catch (loginErr) {
+          console.warn(`⚠️  Login failed (portal may be down): ${loginErr.message}`);
+          console.log('⏳ Waiting 5 minutes before retrying...');
+          sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed. Will retry in 5 minutes.');
+          await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+          continue;
+        }
       }
 
       // Service any immediate balance refresh requested by the GET /balance API endpoint
@@ -619,7 +627,15 @@ async function run() {
 
         if (!await isSessionActive(page)) {
           console.log('🔒 Session lost before upload — re-logging in...');
-          await login(page);
+          try {
+            await login(page);
+          } catch (loginErr) {
+            console.warn(`⚠️  Login failed before upload (portal may be down): ${loginErr.message}`);
+            console.log('⏳ Waiting 5 minutes before retrying...');
+            sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed before upload. Will retry in 5 minutes.');
+            await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+            break; // break out of file loop, continue main while loop
+          }
         }
 
         const { balanceText, totalMB: availableMB } = await checkBalance(page);
@@ -657,9 +673,9 @@ async function run() {
   } catch (err) {
     console.error('❌ Fatal error:', err.message);
     sendAlert('❌ MTN GroupShare — Fatal Error', err.message);
-    await page.screenshot({ path: 'error-state.png' });
+    try { await page.screenshot({ path: 'error-state.png' }); } catch {}
   } finally {
-    await page.waitForTimeout(5000);
+    try { await page.waitForTimeout(5000); } catch {}
     await browser.close();
   }
 }
