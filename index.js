@@ -60,11 +60,10 @@ async function sendCallback(filename, status, completedAt) {
     return;
   }
 
-  const originalFilename = stripTimestamp(filename);
   const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
-  const body = JSON.stringify({ filename: originalFilename, status, completedAt });
+  const body = JSON.stringify({ filename, status, completedAt });
 
-  console.log(`📡 Sending callback for "${originalFilename}" (${status}) to ${orderSystemUrl}...`);
+  console.log(`📡 Sending callback for "${filename}" (${status}) to ${orderSystemUrl}...`);
 
   try {
     const res = await fetch(url, {
@@ -73,13 +72,13 @@ async function sendCallback(filename, status, completedAt) {
       body,
     });
     if (res.ok) {
-      console.log(`📤 Callback sent for "${originalFilename}" (${status}) — HTTP ${res.status}`);
+      console.log(`📤 Callback sent for "${filename}" (${status}) — HTTP ${res.status}`);
     } else {
       const text = await res.text().catch(() => '');
-      console.warn(`⚠️  Callback for "${originalFilename}" returned HTTP ${res.status}: ${text}`);
+      console.warn(`⚠️  Callback for "${filename}" returned HTTP ${res.status}: ${text}`);
     }
   } catch (err) {
-    console.error(`❌ Callback failed for "${originalFilename}": ${err.message}`);
+    console.error(`❌ Callback failed for "${filename}": ${err.message}`);
   }
 }
 
