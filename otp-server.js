@@ -70,12 +70,13 @@ app.get('/', (req, res) => {
 });
 
 // ── WAIT FOR OTP ───────────────────────────────────────────
-function resetOtpState() {
+function resetOtpState(clearBuffer = false) {
   if (otpTimer) {
     clearTimeout(otpTimer);
     otpTimer = null;
   }
   otpResolve = null;
+  if (clearBuffer) otpBuffer = null;
 }
 
 function waitForOTP(timeoutMs = 180000) {

@@ -217,15 +217,22 @@ async function login(page) {
       await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
     }
 
-    // ── Phase 2: Wait for OTP once — do NOT reset state between retries ──
-    // waitForOTP checks the buffer first in case the OTP already arrived.
-    // Timeout is long enough to cover all submission retries without re-requesting.
-    console.log('\n✅ On OTP page — waiting for SMS (up to 10 mins)...');
-    const otp = await waitForOTP(10 * 60 * 1000);
-    console.log(`✅ OTP received: ${otp}`);
-
-    // ── Phase 3: Submit OTP — retry without navigating or refreshing ──────
+    // ── Phase 2+3: For each attempt, wait for OTP FIRST then submit ────────
+    // Each attempt waits for its own fresh OTP so we never submit a stale code.
+    // On retry the buffer is cleared so we don't reuse the same rejected OTP.
     for (let attempt = 1; attempt <= maxSubmitAttempts; attempt++) {
+      if (attempt === 1) {
+        console.log('\n⏳ Waiting for OTP SMS (up to 10 mins)...');
+      } else {
+        // Discard any stale buffered OTP so we wait for a brand-new one
+        resetOtpState(true);
+        console.log(`\n⏳ Waiting for fresh OTP for retry ${attempt}/${maxSubmitAttempts} (up to 5 mins)...`);
+      }
+
+      const waitMs = attempt === 1 ? 10 * 60 * 1000 : 5 * 60 * 1000;
+      const otp = await waitForOTP(waitMs);
+      console.log(`✅ OTP received: ${otp}`);
+
       console.log(`\n🔑 OTP submit attempt ${attempt}/${maxSubmitAttempts}...`);
       try {
         // If a previous submission attempt navigated away, return to the OTP
