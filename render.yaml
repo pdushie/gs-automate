@@ -25,6 +25,10 @@ services:
         value: "24"
       - key: DISK_LIMIT_MB
         value: "900"
+      - key: ORDERSYSTEM_URL
+        sync: false
+      - key: GROUPSHARE_CALLBACK_SECRET
+        sync: false
     healthCheckPath: /health
     disk:
       name: groupshare-data

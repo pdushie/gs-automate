@@ -37,6 +37,52 @@ function sendAlert(title, message) {
   notifier.notify({ title, message, sound: true, wait: false });
 }
 
+// Strip the server-added timestamp suffix from a filename before sending callback.
+// e.g. "MyFile-2026-04-07T00-32-29-843Z.xlsx" → "MyFile.xlsx"
+function stripTimestamp(filename) {
+  const ext = path.extname(filename);
+  const base = path.basename(filename, ext);
+  // Matches "-<ISO8601-like timestamp>" appended by api-server storage naming
+  const stripped = base.replace(/-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d+Z$/, '');
+  return stripped + ext;
+}
+
+async function sendCallback(filename, status, completedAt) {
+  const orderSystemUrl = process.env.ORDERSYSTEM_URL;
+  const secret = process.env.GROUPSHARE_CALLBACK_SECRET;
+
+  if (!orderSystemUrl) {
+    console.log('ℹ️  ORDERSYSTEM_URL not set — skipping callback');
+    return;
+  }
+  if (!secret) {
+    console.warn('⚠️  GROUPSHARE_CALLBACK_SECRET not set — skipping callback');
+    return;
+  }
+
+  const originalFilename = stripTimestamp(filename);
+  const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
+  const body = JSON.stringify({ filename: originalFilename, status, completedAt });
+
+  console.log(`📡 Sending callback for "${originalFilename}" (${status}) to ${orderSystemUrl}...`);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (res.ok) {
+      console.log(`📤 Callback sent for "${originalFilename}" (${status}) — HTTP ${res.status}`);
+    } else {
+      const text = await res.text().catch(() => '');
+      console.warn(`⚠️  Callback for "${originalFilename}" returned HTTP ${res.status}: ${text}`);
+    }
+  } catch (err) {
+    console.error(`❌ Callback failed for "${originalFilename}": ${err.message}`);
+  }
+}
+
 // Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh request.
 // Returns true if woken early by the flag, false if the full duration elapsed.
 async function interruptibleSleep(ms, checkIntervalMs = 15000) {
@@ -347,13 +393,15 @@ async function uploadFile(page, excelFile) {
 
       // Duplicate group name — portal won't navigate because the group already exists
       // meaning this file's data was already uploaded. Mark it as done.
+      const completedAt = new Date().toISOString();
       markAsUploaded(excelFile.name);
       updateStatusLog({
         [excelFile.name]: 'DONE',
-        [`${excelFile.name}_completedAt`]: new Date().toISOString(),
+        [`${excelFile.name}_completedAt`]: completedAt,
         [`${excelFile.name}_note`]: `Marked done — portal rejected upload (possible duplicate group name). Portal message: ${portalError}`,
       });
       console.log(`✅ ${excelFile.name} — marked as DONE (already uploaded / duplicate group name)`);
+      await sendCallback(excelFile.name, 'DONE', completedAt);
       return true;
     }
 
@@ -413,15 +461,17 @@ async function uploadFile(page, excelFile) {
 
     if (status === 'DONE') {
       isDone = true;
+      const completedAt = new Date().toISOString();
       markAsUploaded(excelFile.name);
 
       updateStatusLog({
         [excelFile.name]: 'DONE',
-        [`${excelFile.name}_completedAt`]: new Date().toISOString(),
+        [`${excelFile.name}_completedAt`]: completedAt,
       });
 
       await page.screenshot({ path: `done-${fileName}.png` });
       console.log(`🎉 ${excelFile.name} — DONE!`);
+      await sendCallback(excelFile.name, 'DONE', completedAt);
       break;
     }
 
