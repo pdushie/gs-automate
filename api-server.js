@@ -3,6 +3,7 @@ const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const XLSX = require('xlsx');
 require('dotenv').config();
 const { withFileLock, atomicWrite } = require('./lock');
 
@@ -249,6 +250,25 @@ app.post('/upload-base64', (req, res) => {
 });
 
 
+// Parse an Excel file and return total data allocation (GB) and row count
+function getExcelStats(filePath) {
+  try {
+    const workbook = XLSX.readFile(filePath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    const DATA_MB_COL = 3; // column 4 (0-indexed)
+    let totalMB = 0;
+    let rowCount = 0;
+    for (let r = 1; r < rawRows.length; r++) {
+      const val = parseFloat(rawRows[r][DATA_MB_COL]) || 0;
+      if (val > 0) { totalMB += val; rowCount++; }
+    }
+    return { totalDataGB: parseFloat((totalMB / 1024).toFixed(4)), rowCount };
+  } catch {
+    return { totalDataGB: null, rowCount: null };
+  }
+}
+
 // GET /status — get status of all files
 app.get('/status', (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
@@ -257,12 +277,20 @@ app.get('/status', (req, res) => {
 
   const allFiles = fs.readdirSync(folderPath)
     .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'))
-    .map(f => ({
-      filename: f,
-      status: uploaded.includes(f) ? 'DONE' : (statusLog[f] || 'PENDING'),
-      queuedAt: statusLog[f + '_queuedAt'] || null,
-      completedAt: statusLog[f + '_completedAt'] || null,
-    }));
+    .map(f => {
+      const stats = getExcelStats(path.join(folderPath, f));
+      const entry = {
+        filename: f,
+        status: uploaded.includes(f) ? 'DONE' : (statusLog[f] || 'PENDING'),
+        queuedAt: statusLog[f + '_queuedAt'] || null,
+        completedAt: statusLog[f + '_completedAt'] || null,
+        totalDataGB: stats.totalDataGB,
+        rowCount: stats.rowCount,
+      };
+      if (statusLog[f + '_orderIds']) entry.orderIds = statusLog[f + '_orderIds'];
+      else if (statusLog[f + '_orderId']) entry.orderId = statusLog[f + '_orderId'];
+      return entry;
+    });
 
   res.json({ success: true, files: allFiles });
 });
@@ -279,13 +307,19 @@ app.get('/status/:filename', (req, res) => {
     return res.status(404).json({ success: false, error: 'File not found' });
   }
 
-  res.json({
+  const stats = getExcelStats(filePath);
+  const entry = {
     success: true,
     filename,
     status: uploaded.includes(filename) ? 'DONE' : (statusLog[filename] || 'PENDING'),
     queuedAt: statusLog[filename + '_queuedAt'] || null,
     completedAt: statusLog[filename + '_completedAt'] || null,
-  });
+    totalDataGB: stats.totalDataGB,
+    rowCount: stats.rowCount,
+  };
+  if (statusLog[filename + '_orderIds']) entry.orderIds = statusLog[filename + '_orderIds'];
+  else if (statusLog[filename + '_orderId']) entry.orderId = statusLog[filename + '_orderId'];
+  res.json(entry);
 });
 
 
