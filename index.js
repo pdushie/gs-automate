@@ -82,14 +82,15 @@ async function sendCallback(filename, status, completedAt) {
   }
 }
 
-// Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh request.
-// Returns true if woken early by the flag, false if the full duration elapsed.
+// Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh
+// or purchase request. Returns true if woken early by a flag, false if the full duration elapsed.
 async function interruptibleSleep(ms, checkIntervalMs = 15000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const remaining = end - Date.now();
     await new Promise(r => setTimeout(r, Math.min(checkIntervalMs, remaining)));
-    if (loadStatusLog()._balanceRefreshRequested) return true;
+    const log = loadStatusLog();
+    if (log._balanceRefreshRequested || log._purchaseRequested) return true;
   }
   return false;
 }
@@ -275,6 +276,92 @@ async function login(page) {
 
   sendAlert('❌ MTN GroupShare — Login Failed', `OTP was received but login could not be completed after ${maxSubmitAttempts} submission attempts.`);
   throw new Error(`Login failed — OTP submission unsuccessful after ${maxSubmitAttempts} attempts`);
+}
+
+async function purchaseData(page) {
+  console.log('\n💳 Starting data purchase...');
+
+  await page.goto('https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
+
+  // Read account balance
+  await page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { timeout: 15000 });
+  const balanceText = await page.$eval('h3[data-bind*="BalanceFormatted"]', el => el.innerText.trim());
+  console.log(`💰 Account balance: ${balanceText}`);
+
+  // Parse "GH¢ 4,822.11" → 4822.11
+  const balanceMatch = balanceText.replace(/,/g, '').match(/([\d.]+)/);
+  const balance = balanceMatch ? parseFloat(balanceMatch[1]) : 0;
+  const REQUIRED = 4812.96;
+
+  if (balance < REQUIRED) {
+    const msg = `Insufficient account balance. Required: GH¢ ${REQUIRED.toLocaleString()}, Available: ${balanceText}`;
+    console.warn(`⚠️  ${msg}`);
+    sendAlert('⚠️ MTN GroupShare — Cannot Purchase Data', msg);
+    updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+    return false;
+  }
+  console.log(`✅ Balance sufficient — proceeding with purchase`);
+
+  // Set Data bundle value to 1.5 via Kendo NumericTextBox API
+  await page.waitForSelector('input[name="DataBundle"]', { timeout: 10000 });
+  await page.evaluate(() => {
+    const input = document.querySelector('input[name="DataBundle"]');
+    const widget = kendo.widgetInstance(jQuery(input));
+    widget.value(1.5);
+    widget.trigger('change');
+  });
+  console.log('✅ Data bundle set to 1.5');
+
+  // Change unit from MB → TB by clicking the Kendo DropDownList
+  await page.click('span.k-input:has-text("MB")');
+  await page.waitForSelector('.k-list-container .k-item:has-text("TB"), .k-popup .k-item:has-text("TB")', { timeout: 5000 });
+  await page.click('.k-list-container .k-item:has-text("TB"), .k-popup .k-item:has-text("TB")');
+  console.log('✅ Unit set to TB');
+
+  // Click Calculate Package Cost
+  await page.click('button.uk-button-primary:has-text("Calculate Package Cost")');
+  console.log('✅ Calculate Package Cost clicked — waiting for cost table...');
+
+  // Wait for the cost details table to populate
+  await page.waitForFunction(() => {
+    const rows = document.querySelectorAll('tbody[data-template="cost-details-item-template"] tr');
+    return Array.from(rows).some(r => r.innerText.includes('TB'));
+  }, { timeout: 15000 });
+
+  const tableText = await page.$eval('tbody[data-template="cost-details-item-template"]', el => el.innerText);
+  console.log(`📋 Cost details:\n${tableText}`);
+
+  // Verify expected unit and amount before confirming
+  if (!tableText.includes('1 TB, 512 GB') || !tableText.replace(/,/g, '').includes('4812.96')) {
+    const msg = `Unexpected cost details — aborting purchase. Got: ${tableText.trim().replace(/\n/g, ' | ')}`;
+    console.error(`❌ ${msg}`);
+    sendAlert('❌ MTN GroupShare — Purchase Aborted', msg);
+    updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+    return false;
+  }
+  console.log('✅ Cost verified: 1.5 TB (1 TB, 512 GB) @ GH¢ 4,812.96');
+
+  // Click Complete Purchase — opens confirmation modal
+  await page.click('button.uk-button-primary:has-text("Complete Purchase")');
+  console.log('✅ Complete Purchase clicked — waiting for confirmation modal...');
+
+  // Wait for modal and click its primary confirm button
+  await page.waitForSelector('#confirm-purchase-modal button:has-text("I Agree")', { timeout: 10000 });
+  await page.waitForTimeout(500);
+  await page.click('#confirm-purchase-modal button:has-text("I Agree")');
+  console.log('✅ "I Agree" clicked in confirmation modal');
+
+  // Wait for the modal to close and the page to settle
+  await page.waitForTimeout(5000);
+
+  // Confirm purchase by re-reading the data balance — it should have increased
+  const { balanceText: newBalanceText, totalMB: newBalanceMB } = await checkBalance(page);
+  console.log(`💰 Balance after purchase: ${newBalanceText} (${newBalanceMB.toFixed(2)} MB)`);
+
+  console.log('🎉 Data purchase complete!');
+  sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText}`);
+  updateStatusLog({ _purchaseStatus: 'DONE', _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`, _purchaseCompletedAt: new Date().toISOString() });
+  return true;
 }
 
 async function checkBalance(page) {
@@ -605,6 +692,20 @@ async function run() {
         freshBalanceJustFetched = true;
       }
 
+      // Service a data purchase requested by POST /purchase
+      if (loadStatusLog()._purchaseRequested) {
+        console.log('💳 Purchase requested via API — starting now...');
+        updateStatusLog({ _purchaseRequested: false, _purchaseStatus: 'IN_PROGRESS' });
+        try {
+          await purchaseData(page);
+        } catch (purchaseErr) {
+          console.error(`❌ Purchase failed: ${purchaseErr.message}`);
+          sendAlert('❌ MTN GroupShare — Purchase Error', purchaseErr.message);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+        }
+        continue;
+      }
+
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
 
       if (pendingFiles.length === 0) {
@@ -621,6 +722,11 @@ async function run() {
 
       idleCount = 0;
       console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
+
+      let anyFileUploaded = false;
+      let lastAvailableMB = null;
+      let lastBalanceText = null;
+      let skippedDueToBalance = 0;
 
       for (let i = 0; i < pendingFiles.length; i++) {
         console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
@@ -639,6 +745,8 @@ async function run() {
         }
 
         const { balanceText, totalMB: availableMB } = await checkBalance(page);
+        lastAvailableMB = availableMB;
+        lastBalanceText = balanceText;
         const requiredMB = getExcelTotalMB(pendingFiles[i].fullPath);
 
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
@@ -646,11 +754,8 @@ async function run() {
 
         if (requiredMB > availableMB) {
           const shortfall = (requiredMB - availableMB).toFixed(2);
-          sendAlert(
-            '⚠️ MTN GroupShare — Insufficient Balance',
-            `Cannot upload "${pendingFiles[i].name}".\nRequired: ${requiredMB.toFixed(2)} MB\nAvailable: ${availableMB.toFixed(2)} MB\nShortfall: ${shortfall} MB\nPlease top up and try again.`
-          );
-          console.warn(`⚠️  Skipping — will recheck in 3 mins.`);
+          console.warn(`⚠️  Skipping "${pendingFiles[i].name}" — insufficient balance (shortfall: ${shortfall} MB)`);
+          skippedDueToBalance++;
           continue;
         }
 
@@ -663,6 +768,31 @@ async function run() {
         if (uploadResult && uploadResult.error) {
           console.warn('⚠️ Upload navigation error — skipping to next file.');
           continue;
+        }
+        anyFileUploaded = true;
+      }
+
+      // After processing all files: if nothing could be uploaded due to low balance,
+      // and balance is at or below 90 GB, trigger an auto-purchase then immediately
+      // re-scan to process the pending files with the new balance.
+      const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
+      const purchaseStatus = loadStatusLog()._purchaseStatus;
+      if (!anyFileUploaded && skippedDueToBalance > 0 && lastAvailableMB !== null
+          && lastAvailableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatus !== 'IN_PROGRESS') {
+        console.log(`💳 All ${skippedDueToBalance} file(s) skipped due to low balance (${lastBalanceText}) — triggering auto-purchase...`);
+        sendAlert('💳 MTN GroupShare — Auto-Purchase', `All pending files require more data than available (${lastBalanceText}). Purchasing 1.5 TB bundle.`);
+        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+        let purchaseSucceeded = false;
+        try {
+          purchaseSucceeded = await purchaseData(page);
+        } catch (purchaseErr) {
+          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+        }
+        if (purchaseSucceeded) {
+          console.log('🔄 Purchase complete — resuming file processing immediately...');
+          continue; // skip the sleep and go straight back to the top of the while loop
         }
       }
 

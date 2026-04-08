@@ -353,6 +353,28 @@ app.get('/balance', async (req, res) => {
 });
 
 
+// POST /purchase — trigger a data bundle purchase on the bot
+app.post('/purchase', (req, res) => {
+  withFileLock(STATUS_LOG, () => {
+    const statusLog = loadStatusLog();
+    saveStatusLog({ ...statusLog, _purchaseRequested: true, _purchaseStatus: 'PENDING', _purchaseRequestedAt: new Date().toISOString() });
+  });
+  console.log('📲 Purchase requested via API');
+  return res.status(202).json({ success: true, note: 'Purchase request queued. Poll GET /purchase-status for result.' });
+});
+
+// GET /purchase-status — check the current state of a purchase request
+app.get('/purchase-status', (req, res) => {
+  const log = loadStatusLog();
+  return res.json({
+    status: log._purchaseStatus || 'IDLE',
+    note: log._purchaseNote || null,
+    requestedAt: log._purchaseRequestedAt || null,
+    completedAt: log._purchaseCompletedAt || null,
+  });
+});
+
+
 // GET /disk — get current disk usage of the upload folder
 app.get('/disk', (req, res) => {
   const usage = getDiskUsage();
