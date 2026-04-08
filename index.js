@@ -408,7 +408,7 @@ async function checkBalance(page) {
   return { balanceText, totalMB };
 }
 
-function getExcelTotalMB(filePath) {
+function _parseExcelTotalMB(filePath) {
   const workbook = XLSX.readFile(filePath);
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
@@ -431,6 +431,26 @@ function getExcelTotalMB(filePath) {
 
   console.log(`📊 File: ${path.basename(filePath)}`);
   console.log(`📊 Rows: ${rowCount} | Total required: ${totalMB.toFixed(2)} MB (${(totalMB / 1024).toFixed(2)} GB)`);
+  return totalMB;
+}
+
+// Returns cached totalMB for a file if the file hasn't changed (mtime match),
+// otherwise parses the XLSX and caches the result for next time.
+function getExcelTotalMB(file) {
+  const filePath = file.fullPath || file;
+  const fileName = path.basename(filePath);
+  const mtime = (file.mtime || fs.statSync(filePath).mtime).toISOString();
+
+  const log = loadStatusLog();
+  const cachedMtime = log[`${fileName}_totalMB_mtime`];
+  if (cachedMtime === mtime && log[`${fileName}_totalMB`] != null) {
+    const cached = log[`${fileName}_totalMB`];
+    console.log(`📊 File: ${fileName} — using cached total: ${cached.toFixed(2)} MB (${(cached / 1024).toFixed(2)} GB)`);
+    return cached;
+  }
+
+  const totalMB = _parseExcelTotalMB(filePath);
+  updateStatusLog({ [`${fileName}_totalMB`]: totalMB, [`${fileName}_totalMB_mtime`]: mtime });
   return totalMB;
 }
 
@@ -795,7 +815,7 @@ async function run() {
           }
         }
 
-        const requiredMB = getExcelTotalMB(pendingFiles[i].fullPath);
+        const requiredMB = getExcelTotalMB(pendingFiles[i]);
 
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
         console.log(`📊 Required  : ${requiredMB.toFixed(2)} MB (${(requiredMB / 1024).toFixed(2)} GB)`);
