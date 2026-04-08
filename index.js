@@ -743,10 +743,40 @@ async function run() {
       idleCount = 0;
       console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
 
+      // Check balance once before iterating files (reuse if already fetched above for a refresh request)
+      let availableMB, balanceText;
+      if (freshBalanceJustFetched) {
+        const log = loadStatusLog();
+        balanceText = log._lastBalance || 'Unknown';
+        availableMB = log._lastBalanceMB || 0;
+        console.log(`💰 Balance (cached): ${balanceText} (${availableMB.toFixed(2)} MB)`);
+      } else {
+        ({ balanceText, totalMB: availableMB } = await checkBalance(page));
+      }
+
+      // If balance is at or below 90 GB threshold, purchase data BEFORE processing any files
+      const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
+      const purchaseStatus = loadStatusLog()._purchaseStatus;
+      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatus !== 'IN_PROGRESS') {
+        console.log(`💳 Balance (${balanceText}) is ≤ 90 GB — triggering auto-purchase before processing files...`);
+        sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance (${balanceText}) is at or below 90 GB threshold. Purchasing 1.5 TB bundle.`);
+        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+        let purchaseSucceeded = false;
+        try {
+          purchaseSucceeded = await purchaseData(page);
+        } catch (purchaseErr) {
+          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+        }
+        if (purchaseSucceeded) {
+          console.log('🔄 Purchase complete — resuming file processing immediately...');
+          continue; // skip the sleep and go straight back to the top of the while loop
+        }
+        // Purchase failed — fall through and attempt to process files with current balance
+      }
+
       let anyFileUploaded = false;
-      let lastAvailableMB = null;
-      let lastBalanceText = null;
-      let skippedDueToBalance = 0;
 
       for (let i = 0; i < pendingFiles.length; i++) {
         console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
@@ -764,9 +794,6 @@ async function run() {
           }
         }
 
-        const { balanceText, totalMB: availableMB } = await checkBalance(page);
-        lastAvailableMB = availableMB;
-        lastBalanceText = balanceText;
         const requiredMB = getExcelTotalMB(pendingFiles[i].fullPath);
 
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
@@ -775,7 +802,6 @@ async function run() {
         if (requiredMB > availableMB) {
           const shortfall = (requiredMB - availableMB).toFixed(2);
           console.warn(`⚠️  Skipping "${pendingFiles[i].name}" — insufficient balance (shortfall: ${shortfall} MB)`);
-          skippedDueToBalance++;
           continue;
         }
 
@@ -790,30 +816,6 @@ async function run() {
           continue;
         }
         anyFileUploaded = true;
-      }
-
-      // After processing all files: if nothing could be uploaded due to low balance,
-      // and balance is at or below 90 GB, trigger an auto-purchase then immediately
-      // re-scan to process the pending files with the new balance.
-      const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
-      const purchaseStatus = loadStatusLog()._purchaseStatus;
-      if (!anyFileUploaded && skippedDueToBalance > 0 && lastAvailableMB !== null
-          && lastAvailableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatus !== 'IN_PROGRESS') {
-        console.log(`💳 All ${skippedDueToBalance} file(s) skipped due to low balance (${lastBalanceText}) — triggering auto-purchase...`);
-        sendAlert('💳 MTN GroupShare — Auto-Purchase', `All pending files require more data than available (${lastBalanceText}). Purchasing 1.5 TB bundle.`);
-        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
-        let purchaseSucceeded = false;
-        try {
-          purchaseSucceeded = await purchaseData(page);
-        } catch (purchaseErr) {
-          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
-          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
-          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
-        }
-        if (purchaseSucceeded) {
-          console.log('🔄 Purchase complete — resuming file processing immediately...');
-          continue; // skip the sleep and go straight back to the top of the while loop
-        }
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);
