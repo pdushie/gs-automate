@@ -777,6 +777,7 @@ async function run() {
       }
 
       let anyFileUploaded = false;
+      let skippedDueToBalance = 0;
 
       for (let i = 0; i < pendingFiles.length; i++) {
         console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
@@ -802,6 +803,7 @@ async function run() {
         if (requiredMB > availableMB) {
           const shortfall = (requiredMB - availableMB).toFixed(2);
           console.warn(`⚠️  Skipping "${pendingFiles[i].name}" — insufficient balance (shortfall: ${shortfall} MB)`);
+          skippedDueToBalance++;
           continue;
         }
 
@@ -816,6 +818,14 @@ async function run() {
           continue;
         }
         anyFileUploaded = true;
+      }
+
+      // All files were skipped because none fit within the available balance — alert the user
+      if (!anyFileUploaded && skippedDueToBalance === pendingFiles.length) {
+        const availableGB = (availableMB / 1024).toFixed(2);
+        const msg = `None of the ${pendingFiles.length} pending file(s) fit within the available balance (${balanceText} / ${availableGB} GB). Please add an Excel file whose total data allocation in column 4 is ≤ ${availableGB} GB, or top up the data balance.`;
+        console.warn(`⚠️  ${msg}`);
+        sendAlert('⚠️ MTN GroupShare — No File Fits Available Balance', msg);
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);
