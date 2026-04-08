@@ -203,7 +203,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
 // POST /upload-base64 — accept Excel as base64 string
 app.post('/upload-base64', (req, res) => {
-  const { filename, data } = req.body;
+  const { filename, data, orderId, orderIds } = req.body;
 
   if (!filename || !data) {
     return res.status(400).json({ success: false, error: 'filename and data are required' });
@@ -222,6 +222,20 @@ app.post('/upload-base64', (req, res) => {
 
     fs.writeFileSync(savePath, Buffer.from(data, 'base64'));
     console.log(`📥 API received base64 file: ${savedName}`);
+
+    // Persist order reference(s) so the bot can include them in the callback
+    const orderMeta = {};
+    if (Array.isArray(orderIds) && orderIds.length > 0) {
+      orderMeta[`${savedName}_orderIds`] = orderIds;
+    } else if (orderId) {
+      orderMeta[`${savedName}_orderId`] = orderId;
+    }
+    if (Object.keys(orderMeta).length > 0) {
+      withFileLock(STATUS_LOG, () => {
+        const log = loadStatusLog();
+        saveStatusLog({ ...log, ...orderMeta });
+      });
+    }
 
     res.json({
       success: true,

@@ -71,8 +71,17 @@ async function sendCallback(filename, status, completedAt) {
     return;
   }
 
+  // Retrieve stored order reference(s) for this file
+  const statusLog = loadStatusLog();
+  const payload = { filename, status, completedAt };
+  if (statusLog[`${filename}_orderIds`]) {
+    payload.orderIds = statusLog[`${filename}_orderIds`];
+  } else if (statusLog[`${filename}_orderId`]) {
+    payload.orderId = statusLog[`${filename}_orderId`];
+  }
+
   const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
-  const body = JSON.stringify({ filename, status, completedAt });
+  const body = JSON.stringify(payload);
 
   console.log(`📡 Sending callback for "${filename}" (${status}) to ${orderSystemUrl}...`);
 
