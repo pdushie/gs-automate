@@ -1,11 +1,16 @@
 const { chromium } = require('playwright');
 const { waitForOTP, startServer, resetOtpState } = require('./otp-server');
 const { withFileLock, atomicWrite } = require('./lock');
+const TelegramBot = require('node-telegram-bot-api');
 const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const notifier = require('node-notifier');
 require('dotenv').config();
+
+const tgBot = process.env.TELEGRAM_BOT_TOKEN
+  ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN)
+  : null;
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
@@ -35,6 +40,12 @@ function updateStatusLog(updates) {
 function sendAlert(title, message) {
   console.warn(`🔔 ALERT: ${title} — ${message}`);
   notifier.notify({ title, message, sound: true, wait: false });
+
+  if (tgBot && process.env.TELEGRAM_CHAT_ID) {
+    const text = `🔔 *${title}*\n${message}`;
+    tgBot.sendMessage(process.env.TELEGRAM_CHAT_ID, text, { parse_mode: 'Markdown' })
+      .catch(err => console.error(`❌ Telegram alert failed: ${err.message}`));
+  }
 }
 
 // Strip the server-added timestamp suffix from a filename before sending callback.
