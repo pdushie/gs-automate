@@ -778,32 +778,23 @@ async function run() {
         ({ balanceText, totalMB: availableMB } = await checkBalance(page));
       }
 
-      // If balance is at or below 90 GB threshold, purchase data BEFORE processing any files
       const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
-      const purchaseStatus = loadStatusLog()._purchaseStatus;
-      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatus !== 'IN_PROGRESS') {
-        console.log(`💳 Balance (${balanceText}) is ≤ 90 GB — triggering auto-purchase before processing files...`);
-        sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance (${balanceText}) is at or below 90 GB threshold. Purchasing 1.5 TB bundle.`);
-        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
-        let purchaseSucceeded = false;
-        try {
-          purchaseSucceeded = await purchaseData(page);
-        } catch (purchaseErr) {
-          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
-          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
-          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
-        }
-        if (purchaseSucceeded) {
-          console.log('🔄 Purchase complete — resuming file processing immediately...');
-          continue; // skip the sleep and go straight back to the top of the while loop
-        }
-        // Purchase failed — fall through and attempt to process files with current balance
-      }
-
       let anyFileUploaded = false;
       let skippedDueToBalance = 0;
+      let autoPurchaseTriggered = false;
 
       for (let i = 0; i < pendingFiles.length; i++) {
+
+        // ── Step 1: Check if running balance is ≤ 90 GB before attempting next file ──
+        const purchaseStatusNow = loadStatusLog()._purchaseStatus;
+        if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusNow !== 'IN_PROGRESS') {
+          console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next file...`);
+          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+          autoPurchaseTriggered = true;
+          break;
+        }
+
         console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
 
         if (!await isSessionActive(page)) {
@@ -815,12 +806,12 @@ async function run() {
             console.log('⏳ Waiting 5 minutes before retrying...');
             sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed before upload. Will retry in 5 minutes.');
             await new Promise(r => setTimeout(r, 5 * 60 * 1000));
-            break; // break out of file loop, continue main while loop
+            break;
           }
         }
 
+        // ── Step 2: Check if this file fits the remaining balance (FCFS) ──
         const requiredMB = getExcelTotalMB(pendingFiles[i]);
-
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
         console.log(`📊 Required  : ${requiredMB.toFixed(2)} MB (${(requiredMB / 1024).toFixed(2)} GB)`);
 
@@ -828,9 +819,10 @@ async function run() {
           const shortfall = (requiredMB - availableMB).toFixed(2);
           console.warn(`⚠️  "${pendingFiles[i].name}" requires more data than available (shortfall: ${shortfall} MB) — stopping queue (FCFS).`);
           skippedDueToBalance++;
-          break; // strict FCFS: don't jump over this file to process a later one
+          break;
         }
 
+        // ── Step 3: Upload ──
         console.log(`✅ Balance sufficient — proceeding...`);
         const uploadResult = await uploadFile(page, pendingFiles[i]);
         if (uploadResult && uploadResult.blocked) {
@@ -841,13 +833,35 @@ async function run() {
           console.warn('⚠️ Upload navigation error — skipping to next file.');
           continue;
         }
+
+        // ── Step 4: Re-check actual balance from portal after upload ──
         anyFileUploaded = true;
+        const { balanceText: updatedBalanceText, totalMB: updatedMB } = await checkBalance(page);
+        availableMB = updatedMB;
+        balanceText = updatedBalanceText;
+        console.log(`💰 Confirmed balance after upload: ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
       }
 
-      // The first pending file doesn't fit within the available balance — alert the user
+      // Running balance hit ≤ 90 GB — purchase now then re-scan
+      if (autoPurchaseTriggered) {
+        let purchaseSucceeded = false;
+        try {
+          purchaseSucceeded = await purchaseData(page);
+        } catch (purchaseErr) {
+          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+        }
+        if (purchaseSucceeded) {
+          console.log('🔄 Purchase complete — resuming file processing immediately...');
+          continue;
+        }
+      }
+
+      // Went through all pending files and none fit — alert user to resolve
       if (!anyFileUploaded && skippedDueToBalance > 0) {
         const availableGB = (availableMB / 1024).toFixed(2);
-        const msg = `None of the ${pendingFiles.length} pending file(s) fit within the available balance (${balanceText} / ${availableGB} GB). Please add an Excel file whose total data allocation in column 4 is ≤ ${availableGB} GB, or top up the data balance.`;
+        const msg = `None of the ${pendingFiles.length} pending file(s) fit within the available balance (${availableGB} GB). Please add an Excel file whose total data allocation in column 4 is ≤ ${availableGB} GB, or top up the data balance.`;
         console.warn(`⚠️  ${msg}`);
         sendAlert('⚠️ MTN GroupShare — No File Fits Available Balance', msg);
       }
