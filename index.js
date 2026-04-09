@@ -836,6 +836,8 @@ async function run() {
 
         // ── Step 4: Re-check actual balance from portal after upload ──
         anyFileUploaded = true;
+        // Clear insufficient flag since we just successfully uploaded
+        updateStatusLog({ _balanceInsufficient: false });
         const { balanceText: updatedBalanceText, totalMB: updatedMB } = await checkBalance(page);
         availableMB = updatedMB;
         balanceText = updatedBalanceText;
@@ -853,17 +855,19 @@ async function run() {
           updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
         }
         if (purchaseSucceeded) {
+          updateStatusLog({ _balanceInsufficient: false });
           console.log('🔄 Purchase complete — resuming file processing immediately...');
           continue;
         }
       }
 
-      // Went through all pending files and none fit — alert user to resolve
+      // Went through all pending files and none fit — block uploads and alert user
       if (!anyFileUploaded && skippedDueToBalance > 0) {
         const availableGB = (availableMB / 1024).toFixed(2);
-        const msg = `None of the ${pendingFiles.length} pending file(s) fit within the available balance (${availableGB} GB). Please add an Excel file whose total data allocation in column 4 is ≤ ${availableGB} GB, or top up the data balance.`;
+        const msg = `Pending file requires more data than available (${availableGB} GB). Uploads paused. Purchase a bundle or wait for balance top-up.`;
         console.warn(`⚠️  ${msg}`);
-        sendAlert('⚠️ MTN GroupShare — No File Fits Available Balance', msg);
+        updateStatusLog({ _balanceInsufficient: true });
+        sendAlert('⚠️ MTN GroupShare — Balance Insufficient', msg);
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);

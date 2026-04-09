@@ -232,6 +232,19 @@ function getFileTotalMBFromBuffer(buffer) {
   }
 }
 
+function balanceInsufficientResponse(res, availableMB) {
+  const availableGB = parseFloat((availableMB / 1024).toFixed(2));
+  console.warn(`🚫 Upload rejected — data balance insufficient: ${availableGB} GB available`);
+  return res.status(503)
+    .set('Retry-After', '300')
+    .json({
+      success: false,
+      error: 'BALANCE_INSUFFICIENT',
+      message: `Data balance is insufficient (${availableGB} GB available). Uploads are paused until a data bundle is purchased or balance is topped up.`,
+      availableDataGB: availableGB,
+    });
+}
+
 function queueFullResponse(res, pendingMB) {
   const pendingGB = parseFloat((pendingMB / 1024).toFixed(2));
   const capacityGB = parseFloat((QUEUE_CAPACITY_MB / 1024).toFixed(2));
@@ -253,10 +266,10 @@ function queueFullResponse(res, pendingMB) {
 
 // POST /upload — accept an Excel file from external app
 app.post('/upload', (req, res, next) => {
-  // Capacity check BEFORE multer writes the file to disk —
-  // if the queue is full the file never lands on disk and the sender knows to retry.
+  // Balance & capacity checks BEFORE multer writes the file to disk
   const statusLog = loadStatusLog();
   const uploadedLog = loadUploadedLog();
+  if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
   const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
   if (pendingMB > QUEUE_CAPACITY_MB) return queueFullResponse(res, pendingMB);
   next();
@@ -290,10 +303,11 @@ app.post('/upload-base64', (req, res) => {
   try {
     const buffer = Buffer.from(data, 'base64');
 
-    // Queue capacity check — parse new file's data total and compare against pending queue
+    // Balance & capacity checks before saving the file
     const newFileMB = getFileTotalMBFromBuffer(buffer);
     const statusLog = loadStatusLog();
     const uploadedLog = loadUploadedLog();
+    if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
     const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
     if (pendingMB + newFileMB > QUEUE_CAPACITY_MB) {
       return queueFullResponse(res, pendingMB + newFileMB);
