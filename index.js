@@ -592,7 +592,7 @@ async function uploadFile(page, excelFile) {
   updateStatusLog({ [excelFile.name]: 'PROCESSING' });
 
   const maxAttempts = 70;
-  const pollInterval = 30000;
+  const pollInterval = 20000;
   let isDone = false;
   let isFailed = false;
 

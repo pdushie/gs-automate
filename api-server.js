@@ -17,7 +17,8 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
-const QUEUE_CAPACITY_MB = (1.5 * 1024 * 1024) + (100 * 1024); // 1.5 TB + 100 GB threshold
+const QUEUE_CAPACITY_MB  = 1.5 * 1024 * 1024;               // 1.5 TB — displayed capacity
+const QUEUE_THRESHOLD_MB = QUEUE_CAPACITY_MB - (10 * 1024);  // 1.49 TB — reject when pending exceeds this
 
 
 // Auto-create upload folder if it doesn't exist
@@ -271,7 +272,7 @@ app.post('/upload', (req, res, next) => {
   const uploadedLog = loadUploadedLog();
   if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
   const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
-  if (pendingMB > QUEUE_CAPACITY_MB) return queueFullResponse(res, pendingMB);
+  if (pendingMB > QUEUE_THRESHOLD_MB) return queueFullResponse(res, pendingMB);
   next();
 }, upload.single('file'), (req, res) => {
   if (!req.file) {
@@ -309,7 +310,7 @@ app.post('/upload-base64', (req, res) => {
     const uploadedLog = loadUploadedLog();
     if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
     const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
-    if (pendingMB + newFileMB > QUEUE_CAPACITY_MB) {
+    if (pendingMB + newFileMB > QUEUE_THRESHOLD_MB) {
       return queueFullResponse(res, pendingMB + newFileMB);
     }
 
