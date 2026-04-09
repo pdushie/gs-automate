@@ -9,8 +9,12 @@ const notifier = require('node-notifier');
 require('dotenv').config();
 
 const tgBot = process.env.TELEGRAM_BOT_TOKEN
-  ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN)
+  ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false })
   : null;
+
+function escapeHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
@@ -42,8 +46,8 @@ function sendAlert(title, message) {
   notifier.notify({ title, message, sound: true, wait: false });
 
   if (tgBot && process.env.TELEGRAM_CHAT_ID) {
-    const text = `🔔 *${title}*\n${message}`;
-    tgBot.sendMessage(process.env.TELEGRAM_CHAT_ID, text, { parse_mode: 'Markdown' })
+    const text = `🔔 <b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`;
+    tgBot.sendMessage(process.env.TELEGRAM_CHAT_ID, text, { parse_mode: 'HTML' })
       .catch(err => console.error(`❌ Telegram alert failed: ${err.message}`));
   }
 }
