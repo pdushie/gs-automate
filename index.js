@@ -822,9 +822,9 @@ async function run() {
 
         if (requiredMB > availableMB) {
           const shortfall = (requiredMB - availableMB).toFixed(2);
-          console.warn(`⚠️  Skipping "${pendingFiles[i].name}" — insufficient balance (shortfall: ${shortfall} MB)`);
+          console.warn(`⚠️  "${pendingFiles[i].name}" requires more data than available (shortfall: ${shortfall} MB) — stopping queue (FCFS).`);
           skippedDueToBalance++;
-          continue;
+          break; // strict FCFS: don't jump over this file to process a later one
         }
 
         console.log(`✅ Balance sufficient — proceeding...`);
@@ -840,8 +840,8 @@ async function run() {
         anyFileUploaded = true;
       }
 
-      // All files were skipped because none fit within the available balance — alert the user
-      if (!anyFileUploaded && skippedDueToBalance === pendingFiles.length) {
+      // The first pending file doesn't fit within the available balance — alert the user
+      if (!anyFileUploaded && skippedDueToBalance > 0) {
         const availableGB = (availableMB / 1024).toFixed(2);
         const msg = `None of the ${pendingFiles.length} pending file(s) fit within the available balance (${balanceText} / ${availableGB} GB). Please add an Excel file whose total data allocation in column 4 is ≤ ${availableGB} GB, or top up the data balance.`;
         console.warn(`⚠️  ${msg}`);
