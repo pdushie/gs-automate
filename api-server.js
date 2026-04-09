@@ -17,6 +17,7 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
+const QUEUE_CAPACITY_MB = (1.5 * 1024 * 1024) + (100 * 1024); // 1.5 TB + 100 GB threshold
 
 
 // Auto-create upload folder if it doesn't exist
@@ -186,8 +187,80 @@ function cleanupOldFiles() {
 // ── ROUTES ────────────────────────────────────────────────
 
 
+// Returns the sum of data (MB) across all pending (not-yet-processed) files in the queue.
+// Uses the bot's cached _totalMB values from the status log to avoid re-parsing XLSX.
+function getPendingQueueTotalMB(statusLog, uploadedLog) {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  if (!folderPath || !fs.existsSync(folderPath)) return 0;
+
+  const DONE_STATES = new Set(['DONE', 'ABANDONED', 'FAILED']);
+  let totalMB = 0;
+
+  const files = fs.readdirSync(folderPath)
+    .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
+
+  for (const file of files) {
+    if (uploadedLog.includes(file)) continue;
+    if (DONE_STATES.has(statusLog[file])) continue;
+
+    if (statusLog[`${file}_totalMB`] != null) {
+      totalMB += statusLog[`${file}_totalMB`];
+    } else {
+      // Cache miss — parse the file directly
+      const { totalDataGB } = getExcelStats(path.join(folderPath, file));
+      if (totalDataGB != null) totalMB += totalDataGB * 1024;
+    }
+  }
+
+  return totalMB;
+}
+
+// Parse a file buffer (base64-decoded) to get its data total from column 4 (DATA_MB).
+function getFileTotalMBFromBuffer(buffer) {
+  try {
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    let totalMB = 0;
+    for (let r = 1; r < rawRows.length; r++) {
+      const val = parseFloat(rawRows[r][3]) || 0;
+      if (val > 0) totalMB += val;
+    }
+    return totalMB;
+  } catch {
+    return 0;
+  }
+}
+
+function queueFullResponse(res, pendingMB) {
+  const pendingGB = parseFloat((pendingMB / 1024).toFixed(2));
+  const capacityGB = parseFloat((QUEUE_CAPACITY_MB / 1024).toFixed(2));
+  console.warn(`🚫 Queue full — pending: ${pendingGB} GB / capacity: ${capacityGB} GB`);
+  return res.status(503)
+    .set('Retry-After', '300')
+    .json({
+      success: false,
+      error: 'QUEUE_FULL',
+      message: `Upload queue is full (${pendingGB} GB pending of ${capacityGB} GB capacity). Try again after current files have been processed.`,
+      pendingDataGB: pendingGB,
+      capacityGB,
+    });
+}
+
+
+// ── ROUTES ────────────────────────────────────────────────
+
+
 // POST /upload — accept an Excel file from external app
-app.post('/upload', upload.single('file'), (req, res) => {
+app.post('/upload', (req, res, next) => {
+  // Capacity check BEFORE multer writes the file to disk —
+  // if the queue is full the file never lands on disk and the sender knows to retry.
+  const statusLog = loadStatusLog();
+  const uploadedLog = loadUploadedLog();
+  const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
+  if (pendingMB > QUEUE_CAPACITY_MB) return queueFullResponse(res, pendingMB);
+  next();
+}, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
@@ -215,13 +288,24 @@ app.post('/upload-base64', (req, res) => {
   }
 
   try {
+    const buffer = Buffer.from(data, 'base64');
+
+    // Queue capacity check — parse new file's data total and compare against pending queue
+    const newFileMB = getFileTotalMBFromBuffer(buffer);
+    const statusLog = loadStatusLog();
+    const uploadedLog = loadUploadedLog();
+    const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
+    if (pendingMB + newFileMB > QUEUE_CAPACITY_MB) {
+      return queueFullResponse(res, pendingMB + newFileMB);
+    }
+
     const ext = path.extname(filename);
     const base = path.basename(filename, ext);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const savedName = `${base}-${timestamp}${ext}`;
     const savePath = path.join(process.env.EXCEL_FOLDER_PATH, savedName);
 
-    fs.writeFileSync(savePath, Buffer.from(data, 'base64'));
+    fs.writeFileSync(savePath, buffer);
     console.log(`📥 API received base64 file: ${savedName}`);
 
     // Persist order reference(s) so the bot can include them in the callback
