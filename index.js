@@ -12,6 +12,10 @@ const tgBot = process.env.TELEGRAM_BOT_TOKEN
   ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false })
   : null;
 
+const tgBot2 = process.env.TELEGRAM_BOT_TOKEN_2
+  ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_2, { polling: false })
+  : null;
+
 function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -45,10 +49,29 @@ function sendAlert(title, message) {
   console.warn(`🔔 ALERT: ${title} — ${message}`);
   notifier.notify({ title, message, sound: true, wait: false });
 
-  if (tgBot && process.env.TELEGRAM_CHAT_ID) {
-    const text = `🔔 <b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`;
-    tgBot.sendMessage(process.env.TELEGRAM_CHAT_ID, text, { parse_mode: 'HTML' })
-      .catch(err => console.error(`❌ Telegram alert failed: ${err.message}`));
+  const text = `🔔 <b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`;
+  const recipients = [
+    { bot: tgBot,  chatId: process.env.TELEGRAM_CHAT_ID },
+    { bot: tgBot2, chatId: process.env.TELEGRAM_CHAT_ID_2 },
+  ];
+
+  for (const { bot, chatId } of recipients) {
+    if (!bot || !chatId) continue;
+    const trySend = (attempt) =>
+      bot.sendMessage(chatId, text, { parse_mode: 'HTML' })
+        .then(() => {
+          if (attempt > 1) console.log(`✅ Telegram alert sent on retry ${attempt}`);
+        })
+        .catch(err => {
+          const detail = err.code ? `${err.code}: ${err.message}` : err.message;
+          if (attempt < 3) {
+            console.warn(`⚠️  Telegram alert failed (attempt ${attempt}): ${detail} — retrying in 10s...`);
+            setTimeout(() => trySend(attempt + 1), 10000);
+          } else {
+            console.error(`❌ Telegram alert failed after ${attempt} attempts: ${detail}`);
+          }
+        });
+    trySend(1);
   }
 }
 
