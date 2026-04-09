@@ -327,7 +327,7 @@ async function purchaseData(page) {
   console.log(`✅ Balance sufficient — proceeding with purchase`);
 
   // Set Data bundle value to 1.5 via Kendo NumericTextBox API
-  await page.waitForSelector('input[name="DataBundle"]', { timeout: 10000 });
+  await page.waitForSelector('input[name="DataBundle"]', { state: 'attached', timeout: 10000 });
   await page.evaluate(() => {
     const input = document.querySelector('input[name="DataBundle"]');
     const widget = kendo.widgetInstance(jQuery(input));
