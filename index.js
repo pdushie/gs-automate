@@ -21,7 +21,7 @@ function escapeHtml(str) {
 }
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
-const IDLE_REFRESH_INTERVAL = 3 * 60 * 1000;
+const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const MAX_FILE_RETRIES = 3;
 
@@ -777,12 +777,36 @@ async function run() {
 
       if (pendingFiles.length === 0) {
         idleCount++;
+        let idleBalanceMB = 0;
         if (!freshBalanceJustFetched) {
           const { balanceText, totalMB } = await checkBalance(page);
-          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 3 mins...`);
+          idleBalanceMB = totalMB;
+          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 1 min...`);
         } else {
-          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Next check in 3 mins...`);
+          idleBalanceMB = loadStatusLog()._lastBalanceMB || 0;
+          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Next check in 1 min...`);
         }
+
+        // Trigger auto-purchase immediately if balance is ≤ 90 GB while idle
+        const idlePurchaseStatus = loadStatusLog()._purchaseStatus;
+        if (idleBalanceMB <= 90 * 1024 && idlePurchaseStatus !== 'IN_PROGRESS') {
+          console.log(`💳 Idle balance is ≤ 90 GB (${(idleBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase immediately...`);
+          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(idleBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+          try {
+            const purchaseSucceeded = await purchaseData(page);
+            if (purchaseSucceeded) {
+              updateStatusLog({ _balanceInsufficient: false });
+              console.log('🔄 Purchase complete — resuming scan...');
+            }
+          } catch (purchaseErr) {
+            console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+            sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+            updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+          }
+          continue;
+        }
+
         await interruptibleSleep(IDLE_REFRESH_INTERVAL);
         continue;
       }
