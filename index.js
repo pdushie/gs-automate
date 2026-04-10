@@ -773,6 +773,30 @@ async function run() {
         continue;
       }
 
+      // ── Balance check — trigger purchase immediately if ≤ 90 GB ──
+      if (!freshBalanceJustFetched) {
+        const { totalMB: currentBalanceMB } = await checkBalance(page);
+        freshBalanceJustFetched = true;
+        const purchaseStatusNow = loadStatusLog()._purchaseStatus;
+        if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS') {
+          console.log(`💳 Balance is ≤ 90 GB (${(currentBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase before scanning files...`);
+          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(currentBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+          try {
+            const purchaseSucceeded = await purchaseData(page);
+            if (purchaseSucceeded) {
+              updateStatusLog({ _balanceInsufficient: false });
+              console.log('🔄 Purchase complete — resuming scan...');
+            }
+          } catch (purchaseErr) {
+            console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+            sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+            updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+          }
+          continue;
+        }
+      }
+
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
 
       if (pendingFiles.length === 0) {
@@ -917,7 +941,7 @@ async function run() {
         sendAlert('⚠️ MTN GroupShare — Balance Insufficient', msg);
       }
 
-      console.log(`\n⏳ Batch complete. Next scan in 3 mins...`);
+      console.log(`\n⏳ Batch complete. Next scan in 1 min...`);
       await interruptibleSleep(IDLE_REFRESH_INTERVAL);
     }
 

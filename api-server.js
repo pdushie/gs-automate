@@ -246,6 +246,21 @@ function balanceInsufficientResponse(res, availableMB) {
     });
 }
 
+function fileExceedsBalanceResponse(res, requiredMB, availableMB) {
+  const requiredGB = parseFloat((requiredMB / 1024).toFixed(2));
+  const availableGB = parseFloat((availableMB / 1024).toFixed(2));
+  console.warn(`🚫 Upload rejected — file allocation (${requiredGB} GB) exceeds available balance (${availableGB} GB)`);
+  return res.status(503)
+    .set('Retry-After', '300')
+    .json({
+      success: false,
+      error: 'BALANCE_INSUFFICIENT',
+      message: `File allocation (${requiredGB} GB) exceeds available balance (${availableGB} GB). Reduce allocation size or wait for balance top-up.`,
+      requiredDataGB: requiredGB,
+      availableDataGB: availableGB,
+    });
+}
+
 function queueFullResponse(res, pendingMB) {
   const pendingGB = parseFloat((pendingMB / 1024).toFixed(2));
   const capacityGB = parseFloat((QUEUE_CAPACITY_MB / 1024).toFixed(2));
@@ -279,6 +294,16 @@ app.post('/upload', (req, res, next) => {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
 
+  // Check if file allocation exceeds available balance
+  const { totalDataGB } = getExcelStats(req.file.path);
+  const fileMB = totalDataGB != null ? totalDataGB * 1024 : 0;
+  const statusLogNow = loadStatusLog();
+  const availableMBNow = statusLogNow._lastBalanceMB || 0;
+  if (fileMB > 0 && availableMBNow > 0 && fileMB > availableMBNow) {
+    try { fs.unlinkSync(req.file.path); } catch {}
+    return fileExceedsBalanceResponse(res, fileMB, availableMBNow);
+  }
+
   console.log(`📥 API received file: ${req.file.filename}`);
   res.json({
     success: true,
@@ -309,6 +334,10 @@ app.post('/upload-base64', (req, res) => {
     const statusLog = loadStatusLog();
     const uploadedLog = loadUploadedLog();
     if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
+    const availableMB = statusLog._lastBalanceMB || 0;
+    if (newFileMB > 0 && availableMB > 0 && newFileMB > availableMB) {
+      return fileExceedsBalanceResponse(res, newFileMB, availableMB);
+    }
     const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
     if (pendingMB + newFileMB > QUEUE_THRESHOLD_MB) {
       return queueFullResponse(res, pendingMB + newFileMB);
