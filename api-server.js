@@ -304,6 +304,10 @@ app.post('/upload', (req, res, next) => {
     return fileExceedsBalanceResponse(res, fileMB, availableMBNow);
   }
 
+  withFileLock(STATUS_LOG, () => {
+    const log = loadStatusLog();
+    saveStatusLog({ ...log, _fileReceived: true });
+  });
   console.log(`📥 API received file: ${req.file.filename}`);
   res.json({
     success: true,
@@ -352,8 +356,8 @@ app.post('/upload-base64', (req, res) => {
     fs.writeFileSync(savePath, buffer);
     console.log(`📥 API received base64 file: ${savedName}`);
 
-    // Persist order reference(s) so the bot can include them in the callback
-    const orderMeta = {};
+    // Persist order reference(s) and wake the idle bot
+    const orderMeta = { _fileReceived: true };
     if (Array.isArray(orderIds) && orderIds.length > 0) {
       orderMeta[`${savedName}_orderIds`] = orderIds;
     } else if (orderId) {

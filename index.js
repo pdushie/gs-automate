@@ -129,15 +129,15 @@ async function sendCallback(filename, status, completedAt) {
   }
 }
 
-// Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh
-// or purchase request. Returns true if woken early by a flag, false if the full duration elapsed.
+// Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh,
+// purchase request, or newly received file. Returns true if woken early, false if full duration elapsed.
 async function interruptibleSleep(ms, checkIntervalMs = 15000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const remaining = end - Date.now();
     await new Promise(r => setTimeout(r, Math.min(checkIntervalMs, remaining)));
     const log = loadStatusLog();
-    if (log._balanceRefreshRequested || log._purchaseRequested) return true;
+    if (log._balanceRefreshRequested || log._purchaseRequested || log._fileReceived) return true;
   }
   return false;
 }
@@ -736,6 +736,9 @@ async function run() {
     let idleCount = 0;
 
     while (true) {
+      // Clear the file-received wake flag at the start of each iteration
+      updateStatusLog({ _fileReceived: false });
+
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
         sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired. Re-logging in automatically...');
