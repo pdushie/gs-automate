@@ -947,10 +947,15 @@ async function run() {
       // All pending files were too large — none fit the available balance
       if (!anyFileUploaded && skippedDueToBalance > 0) {
         const availableGB = (availableMB / 1024).toFixed(2);
-        const msg = `All ${skippedDueToBalance} pending file(s) require more data than available (${availableGB} GB). Uploads paused. Purchase a bundle or send smaller allocations.`;
-        console.warn(`⚠️  ${msg}`);
         updateStatusLog({ _balanceInsufficient: true });
-        sendAlert('⚠️ MTN GroupShare — Balance Insufficient', msg);
+
+        // Cannot trigger a purchase here — MTN only allows purchase when balance < 90 GB.
+        // The only way to unblock is for the sender to submit smaller files that consume
+        // the balance until it drops below 90 GB, which will trigger an auto-purchase.
+        const msg = `All ${skippedDueToBalance} pending file(s) exceed available balance (${availableGB} GB). `
+          + `Send files with total allocation ≤ ${availableGB} GB to drain balance below 90 GB and trigger an auto-purchase.`;
+        console.warn(`⚠️  ${msg}`);
+        sendAlert('⚠️ MTN GroupShare — Queue Blocked', msg);
       }
 
       console.log(`\n⏳ Batch complete. Checking actual balance then next scan in 1 min...`);
