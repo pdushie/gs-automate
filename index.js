@@ -894,9 +894,9 @@ async function run() {
 
         if (requiredMB > availableMB) {
           const shortfall = (requiredMB - availableMB).toFixed(2);
-          console.warn(`⚠️  "${pendingFiles[i].name}" requires more data than available (shortfall: ${shortfall} MB) — stopping queue (FCFS).`);
+          console.warn(`⚠️  "${pendingFiles[i].name}" requires more data than available (shortfall: ${shortfall} MB) — skipping, checking remaining files...`);
           skippedDueToBalance++;
-          break;
+          continue;
         }
 
         // ── Step 3: Upload ──
@@ -944,10 +944,10 @@ async function run() {
         }
       }
 
-      // Went through all pending files and none fit — block uploads and alert user
+      // All pending files were too large — none fit the available balance
       if (!anyFileUploaded && skippedDueToBalance > 0) {
         const availableGB = (availableMB / 1024).toFixed(2);
-        const msg = `Pending file requires more data than available (${availableGB} GB). Uploads paused. Purchase a bundle or wait for balance top-up.`;
+        const msg = `All ${skippedDueToBalance} pending file(s) require more data than available (${availableGB} GB). Uploads paused. Purchase a bundle or send smaller allocations.`;
         console.warn(`⚠️  ${msg}`);
         updateStatusLog({ _balanceInsufficient: true });
         sendAlert('⚠️ MTN GroupShare — Balance Insufficient', msg);
