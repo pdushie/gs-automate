@@ -455,11 +455,32 @@ app.get('/status/:filename', (req, res) => {
 });
 
 
-// GET /balance — trigger a live balance refresh and return the result
+// GET /balance — return estimated balance instantly from status log.
+// Add ?refresh=true to trigger a real portal read (waits up to 25s for bot to respond).
 app.get('/balance', async (req, res) => {
-  const requestedAt = Date.now();
+  const wantRefresh = req.query.refresh === 'true';
 
-  // Signal the bot to do an immediate balance check
+  if (!wantRefresh) {
+    // Fast path — return estimated balance immediately
+    const log = loadStatusLog();
+    let cacheAge = null;
+    if (log._lastBalanceCheckedAt) {
+      const ageMs = Date.now() - new Date(log._lastBalanceCheckedAt).getTime();
+      const ageMins = Math.round(ageMs / 60000);
+      cacheAge = ageMins < 1 ? 'less than a minute ago' : `${ageMins} minute${ageMins === 1 ? '' : 's'} ago`;
+    }
+    return res.json({
+      success: true,
+      balance: log._lastBalance || 'Unknown',
+      balanceMB: log._lastBalanceMB || 0,
+      checkedAt: log._lastBalanceCheckedAt || null,
+      cacheAge,
+      fresh: true,
+    });
+  }
+
+  // Slow path (?refresh=true) — signal the bot to do a real portal read
+  const requestedAt = Date.now();
   withFileLock(STATUS_LOG, () => {
     const statusLog = loadStatusLog();
     saveStatusLog({ ...statusLog, _balanceRefreshRequested: true });
@@ -482,7 +503,7 @@ app.get('/balance', async (req, res) => {
     }
   }
 
-  // Bot did not respond in time — clear the stale flag and return cached value with context
+  // Bot did not respond in time — clear the stale flag and return current estimate
   withFileLock(STATUS_LOG, () => {
     const s = loadStatusLog();
     if (s._balanceRefreshRequested) {
@@ -509,7 +530,6 @@ app.get('/balance', async (req, res) => {
     }
   } catch {}
 
-  // Human-readable age of cached reading
   let cacheAge = null;
   if (final._lastBalanceCheckedAt) {
     const ageMs = Date.now() - new Date(final._lastBalanceCheckedAt).getTime();
@@ -518,8 +538,8 @@ app.get('/balance', async (req, res) => {
   }
 
   const note = busyFile
-    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Cached value is from ${cacheAge || 'an earlier check'}.`
-    : `Bot did not respond within 25 s. Cached value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
+    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Estimated value is from ${cacheAge || 'an earlier check'}.`
+    : `Bot did not respond within 25 s. Estimated value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
 
   return res.json({
     success: true,

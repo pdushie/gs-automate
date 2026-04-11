@@ -22,6 +22,7 @@ function escapeHtml(str) {
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
+const BALANCE_ANCHOR_INTERVAL_MS = 45 * 60 * 1000; // Re-anchor from portal every 45 minutes
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const MAX_FILE_RETRIES = 3;
 
@@ -411,6 +412,23 @@ async function purchaseData(page) {
   return true;
 }
 
+// Deduct a known allocation from the stored balance estimate and write back to the same
+// _lastBalance / _lastBalanceMB / _lastBalanceCheckedAt fields so all consumers are transparent.
+function updateEstimatedBalance(deductMB) {
+  const log = loadStatusLog();
+  const currentMB = log._lastBalanceMB || 0;
+  const newMB = Math.max(0, currentMB - deductMB);
+  const newGB = (newMB / 1024).toFixed(2);
+  const balanceText = `${newGB} GB`;
+  console.log(`💰 Estimated balance: ${balanceText} (deducted ${deductMB.toFixed(2)} MB)`);
+  updateStatusLog({
+    _lastBalance: balanceText,
+    _lastBalanceMB: newMB,
+    _lastBalanceCheckedAt: new Date().toISOString(),
+  });
+  return { balanceText, totalMB: newMB };
+}
+
 async function checkBalance(page) {
   console.log('\n💰 Checking data balance...');
   await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
@@ -551,18 +569,25 @@ async function uploadFile(page, excelFile) {
       });
       console.warn(`⚠️ Portal is still on upload page. Page message: ${portalError}`);
 
-      // Duplicate group name — portal won't navigate because the group already exists
-      // meaning this file's data was already uploaded. Mark it as done.
-      const completedAt = new Date().toISOString();
-      markAsUploaded(excelFile.name);
-      updateStatusLog({
-        [excelFile.name]: 'DONE',
-        [`${excelFile.name}_completedAt`]: completedAt,
-        [`${excelFile.name}_note`]: `Marked done — portal rejected upload (possible duplicate group name). Portal message: ${portalError}`,
-      });
-      console.log(`✅ ${excelFile.name} — marked as DONE (already uploaded / duplicate group name)`);
-      await sendCallback(excelFile.name, 'DONE', completedAt);
-      return true;
+      // Only mark as DONE if the portal error clearly indicates the group already exists.
+      // Any other error is treated as a retryable failure — do NOT mark done prematurely.
+      const isDuplicateGroup = /already exists|duplicate|group name.*taken|already been (uploaded|shared)/i.test(portalError);
+      if (isDuplicateGroup) {
+        const completedAt = new Date().toISOString();
+        markAsUploaded(excelFile.name);
+        updateStatusLog({
+          [excelFile.name]: 'DONE',
+          [`${excelFile.name}_completedAt`]: completedAt,
+          [`${excelFile.name}_note`]: `Marked done — portal rejected upload (duplicate group name). Portal message: ${portalError}`,
+        });
+        console.log(`✅ ${excelFile.name} — marked as DONE (duplicate group name confirmed)`);
+        await sendCallback(excelFile.name, 'DONE', completedAt);
+        return true;
+      }
+
+      // Unknown portal error — treat as a retryable nav failure
+      console.warn(`⚠️ Unknown portal error — treating as nav failure for retry.`);
+      sendAlert('⚠️ MTN GroupShare — Upload Portal Error', `"${excelFile.name}" received an unexpected portal error: ${portalError}`);
     }
 
     // Genuine navigation failure — apply retry / abandon logic
@@ -736,8 +761,8 @@ async function run() {
     let idleCount = 0;
 
     while (true) {
-      // Clear the file-received wake flag at the start of each iteration
-      updateStatusLog({ _fileReceived: false });
+      // Clear the file-received wake flag only if it was set
+      if (loadStatusLog()._fileReceived) updateStatusLog({ _fileReceived: false });
 
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
@@ -776,9 +801,19 @@ async function run() {
         continue;
       }
 
-      // ── Balance check — trigger purchase immediately if ≤ 90 GB ──
+      // ── Balance check — use estimate; re-anchor from portal every 45 minutes ──
       if (!freshBalanceJustFetched) {
-        const { totalMB: currentBalanceMB } = await checkBalance(page);
+        const log = loadStatusLog();
+        const lastChecked = log._lastBalanceCheckedAt ? new Date(log._lastBalanceCheckedAt).getTime() : 0;
+        const needsAnchor = (Date.now() - lastChecked) > BALANCE_ANCHOR_INTERVAL_MS;
+        let currentBalanceMB;
+        if (needsAnchor) {
+          const result = await checkBalance(page);
+          currentBalanceMB = result.totalMB;
+        } else {
+          currentBalanceMB = log._lastBalanceMB || 0;
+          console.log(`💰 Balance (estimated): ${log._lastBalance || 'Unknown'} (${currentBalanceMB.toFixed(2)} MB)`);
+        }
         freshBalanceJustFetched = true;
         const purchaseStatusNow = loadStatusLog()._purchaseStatus;
         if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS') {
@@ -804,36 +839,9 @@ async function run() {
 
       if (pendingFiles.length === 0) {
         idleCount++;
-        let idleBalanceMB = 0;
-        if (!freshBalanceJustFetched) {
-          const { balanceText, totalMB } = await checkBalance(page);
-          idleBalanceMB = totalMB;
-          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${balanceText} (${totalMB.toFixed(2)} MB). Next check in 1 min...`);
-        } else {
-          idleBalanceMB = loadStatusLog()._lastBalanceMB || 0;
-          console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Next check in 1 min...`);
-        }
-
-        // Trigger auto-purchase immediately if balance is ≤ 90 GB while idle
-        const idlePurchaseStatus = loadStatusLog()._purchaseStatus;
-        if (idleBalanceMB <= 90 * 1024 && idlePurchaseStatus !== 'IN_PROGRESS') {
-          console.log(`💳 Idle balance is ≤ 90 GB (${(idleBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase immediately...`);
-          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(idleBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
-          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
-          try {
-            const purchaseSucceeded = await purchaseData(page);
-            if (purchaseSucceeded) {
-              updateStatusLog({ _balanceInsufficient: false });
-              console.log('🔄 Purchase complete — resuming scan...');
-            }
-          } catch (purchaseErr) {
-            console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
-            sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
-            updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
-          }
-          continue;
-        }
-
+        const idleLog = loadStatusLog();
+        const idleBalanceMB = idleLog._lastBalanceMB || 0;
+        console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${idleLog._lastBalance || 'Unknown'} (${idleBalanceMB.toFixed(2)} MB). Next check in 1 min...`);
         await interruptibleSleep(IDLE_REFRESH_INTERVAL);
         continue;
       }
@@ -841,16 +849,11 @@ async function run() {
       idleCount = 0;
       console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
 
-      // Check balance once before iterating files (reuse if already fetched above for a refresh request)
-      let availableMB, balanceText;
-      if (freshBalanceJustFetched) {
-        const log = loadStatusLog();
-        balanceText = log._lastBalance || 'Unknown';
-        availableMB = log._lastBalanceMB || 0;
-        console.log(`💰 Balance (cached): ${balanceText} (${availableMB.toFixed(2)} MB)`);
-      } else {
-        ({ balanceText, totalMB: availableMB } = await checkBalance(page));
-      }
+      // Read current estimated balance for this batch
+      const batchLog = loadStatusLog();
+      let availableMB = batchLog._lastBalanceMB || 0;
+      let balanceText = batchLog._lastBalance || 'Unknown';
+      console.log(`💰 Balance (estimated): ${balanceText} (${availableMB.toFixed(2)} MB)`);
 
       const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
       let anyFileUploaded = false;
@@ -908,14 +911,20 @@ async function run() {
           continue;
         }
 
-        // ── Step 4: Re-check actual balance from portal after upload ──
+        // ── Step 4: Deduct this file's allocation from the estimated balance ──
+        // Only deduct when upload is confirmed DONE (uploadResult === true).
+        // Do NOT deduct for FAILED or TIMEOUT (uploadResult === false) — data was not allocated.
+        if (uploadResult !== true) {
+          console.warn(`⚠️ Upload of "${pendingFiles[i].name}" did not confirm DONE — skipping balance deduction.`);
+          continue;
+        }
         anyFileUploaded = true;
         // Clear insufficient flag since we just successfully uploaded
         updateStatusLog({ _balanceInsufficient: false });
-        const { balanceText: updatedBalanceText, totalMB: updatedMB } = await checkBalance(page);
+        const { balanceText: updatedBalanceText, totalMB: updatedMB } = updateEstimatedBalance(requiredMB);
         availableMB = updatedMB;
         balanceText = updatedBalanceText;
-        console.log(`💰 Confirmed balance after upload: ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
+        console.log(`💰 Estimated balance after upload: ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
       }
 
       // Running balance hit ≤ 90 GB — purchase now then re-scan
