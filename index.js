@@ -953,8 +953,10 @@ async function run() {
         sendAlert('⚠️ MTN GroupShare — Balance Insufficient', msg);
       }
 
-      console.log(`\n⏳ Batch complete. Next scan in 1 min...`);
+      console.log(`\n⏳ Batch complete. Checking actual balance then next scan in 1 min...`);
       await interruptibleSleep(IDLE_REFRESH_INTERVAL);
+      // Re-anchor balance from portal after the sleep (MTN may have finished processing)
+      await checkBalance(page);
     }
 
   } catch (err) {
