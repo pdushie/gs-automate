@@ -190,7 +190,9 @@ function cleanupOldFiles() {
 
 // Returns the sum of data (MB) across all pending (not-yet-processed) files in the queue.
 // Uses the bot's cached _totalMB values from the status log to avoid re-parsing XLSX.
-function getPendingQueueTotalMB(statusLog, uploadedLog) {
+// If availableMB is provided, files that individually exceed it are excluded from the total —
+// they are stuck until a purchase happens and should not block incoming files that DO fit.
+function getPendingQueueTotalMB(statusLog, uploadedLog, availableMB = 0) {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   if (!folderPath || !fs.existsSync(folderPath)) return 0;
 
@@ -204,13 +206,20 @@ function getPendingQueueTotalMB(statusLog, uploadedLog) {
     if (uploadedLog.includes(file)) continue;
     if (DONE_STATES.has(statusLog[file])) continue;
 
+    let fileMB = 0;
     if (statusLog[`${file}_totalMB`] != null) {
-      totalMB += statusLog[`${file}_totalMB`];
+      fileMB = statusLog[`${file}_totalMB`];
     } else {
       // Cache miss — parse the file directly
       const { totalDataGB } = getExcelStats(path.join(folderPath, file));
-      if (totalDataGB != null) totalMB += totalDataGB * 1024;
+      if (totalDataGB != null) fileMB = totalDataGB * 1024;
     }
+
+    // Skip stuck files — they exceed available balance and cannot be processed
+    // until a bundle purchase happens. Don't let them block new incoming files.
+    if (availableMB > 0 && fileMB > availableMB) continue;
+
+    totalMB += fileMB;
   }
 
   return totalMB;
@@ -285,7 +294,8 @@ app.post('/upload', (req, res, next) => {
   // Capacity check BEFORE multer writes the file to disk
   const statusLog = loadStatusLog();
   const uploadedLog = loadUploadedLog();
-  const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
+  const availableForCapacity = statusLog._lastBalanceMB || 0;
+  const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog, availableForCapacity);
   if (pendingMB > QUEUE_THRESHOLD_MB) return queueFullResponse(res, pendingMB);
   next();
 }, upload.single('file'), (req, res) => {
@@ -340,7 +350,7 @@ app.post('/upload-base64', (req, res) => {
     if (newFileMB > 0 && availableMB > 0 && newFileMB > availableMB) {
       return fileExceedsBalanceResponse(res, newFileMB, availableMB);
     }
-    const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
+    const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog, availableMB);
     if (pendingMB + newFileMB > QUEUE_THRESHOLD_MB) {
       return queueFullResponse(res, pendingMB + newFileMB);
     }
