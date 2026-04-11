@@ -859,11 +859,19 @@ async function run() {
       let anyFileUploaded = false;
       let skippedDueToBalance = 0;
       let autoPurchaseTriggered = false;
+      // Track allocations confirmed DONE but not yet reflected in the MTN API balance
+      // (MTN takes time to apply deductions after a successful upload)
+      let pendingDeductionMB = 0;
 
       for (let i = 0; i < pendingFiles.length; i++) {
 
         // ── Step 1: Fetch real balance before each file (API is instant, no navigation needed) ──
-        const { totalMB: availableMB, balanceText } = await checkBalance(page, context);
+        // Subtract any in-flight allocations not yet reflected in the MTN API
+        const { totalMB: apiBalanceMB } = await checkBalance(page, context);
+        const availableMB = Math.max(0, apiBalanceMB - pendingDeductionMB);
+        if (pendingDeductionMB > 0) {
+          console.log(`💰 Effective balance: ${(availableMB / 1024).toFixed(2)} GB (API: ${(apiBalanceMB / 1024).toFixed(2)} GB, pending deduction: ${(pendingDeductionMB / 1024).toFixed(2)} GB — MTN processing lag)`);
+        }
 
         // ── Step 2: Check if balance is ≤ 90 GB before attempting next file ──
         const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
@@ -922,6 +930,8 @@ async function run() {
         anyFileUploaded = true;
         // Clear insufficient flag since we just successfully uploaded
         updateStatusLog({ _balanceInsufficient: false });
+        // Accumulate the in-flight deduction — MTN API balance lags behind actual allocation
+        pendingDeductionMB += requiredMB;
       }
 
       // Running balance hit ≤ 90 GB — purchase now then re-scan
