@@ -22,7 +22,7 @@ function escapeHtml(str) {
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
-const BALANCE_ANCHOR_INTERVAL_MS = 45 * 60 * 1000; // Re-anchor from portal every 45 minutes
+
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const MAX_FILE_RETRIES = 3;
 
@@ -326,7 +326,7 @@ async function login(page) {
   throw new Error(`Login failed — OTP submission unsuccessful after ${maxSubmitAttempts} attempts`);
 }
 
-async function purchaseData(page) {
+async function purchaseData(page, context) {
   console.log('\n💳 Starting data purchase...');
 
   await page.goto('https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
@@ -403,7 +403,7 @@ async function purchaseData(page) {
   await page.waitForTimeout(5000);
 
   // Confirm purchase by re-reading the data balance — it should have increased
-  const { balanceText: newBalanceText, totalMB: newBalanceMB } = await checkBalance(page);
+  const { balanceText: newBalanceText, totalMB: newBalanceMB } = await checkBalance(page, context);
   console.log(`💰 Balance after purchase: ${newBalanceText} (${newBalanceMB.toFixed(2)} MB)`);
 
   console.log('🎉 Data purchase complete!');
@@ -412,25 +412,46 @@ async function purchaseData(page) {
   return true;
 }
 
-// Deduct a known allocation from the stored balance estimate and write back to the same
-// _lastBalance / _lastBalanceMB / _lastBalanceCheckedAt fields so all consumers are transparent.
-function updateEstimatedBalance(deductMB) {
-  const log = loadStatusLog();
-  const currentMB = log._lastBalanceMB || 0;
-  const newMB = Math.max(0, currentMB - deductMB);
-  const newGB = (newMB / 1024).toFixed(2);
-  const balanceText = `${newGB} GB`;
-  console.log(`💰 Estimated balance: ${balanceText} (deducted ${deductMB.toFixed(2)} MB)`);
-  updateStatusLog({
-    _lastBalance: balanceText,
-    _lastBalanceMB: newMB,
-    _lastBalanceCheckedAt: new Date().toISOString(),
-  });
-  return { balanceText, totalMB: newMB };
-}
+async function checkBalance(page, context) {
+  // ── Fast path: direct API call using session cookies from Playwright context ──
+  if (context) {
+    try {
+      const cookies = await context.cookies('https://up2u.mtn.com.gh');
+      const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
 
-async function checkBalance(page) {
-  console.log('\n💰 Checking data balance...');
+      const res = await fetch('https://up2u.mtn.com.gh/providers/api/check-balance', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Cookie': cookieHeader,
+          'Origin': 'https://up2u.mtn.com.gh',
+          'Referer': 'https://up2u.mtn.com.gh/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: JSON.stringify({}),
+      });
+
+      const data = await res.json();
+      if (data.success && data.body && typeof data.body.DataBalanceMB === 'number') {
+        const totalMB = data.body.DataBalanceMB;
+        const balanceText = data.body.DataBalanceFormatted || `${(totalMB / 1024).toFixed(2)} GB`;
+        console.log(`💰 Balance (API): ${balanceText} (${totalMB.toFixed(2)} MB)`);
+        updateStatusLog({
+          _lastBalance: balanceText,
+          _lastBalanceMB: totalMB,
+          _lastBalanceCheckedAt: new Date().toISOString(),
+        });
+        return { balanceText, totalMB };
+      }
+      console.warn('⚠️ Balance API returned unexpected response — falling back to DOM scrape');
+    } catch (apiErr) {
+      console.warn(`⚠️ Balance API call failed: ${apiErr.message} — falling back to DOM scrape`);
+    }
+  }
+
+  // ── Fallback: DOM scrape ──
+  console.log('\n💰 Checking data balance (DOM)...');
   await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
   await page.reload({ waitUntil: 'networkidle' });
   await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
@@ -779,12 +800,10 @@ async function run() {
       }
 
       // Service any immediate balance refresh requested by the GET /balance API endpoint
-      let freshBalanceJustFetched = false;
       if (loadStatusLog()._balanceRefreshRequested) {
         console.log('💰 Balance refresh requested via API — refreshing now...');
         updateStatusLog({ _balanceRefreshRequested: false });
-        await checkBalance(page);
-        freshBalanceJustFetched = true;
+        await checkBalance(page, context);
       }
 
       // Service a data purchase requested by POST /purchase
@@ -792,7 +811,7 @@ async function run() {
         console.log('💳 Purchase requested via API — starting now...');
         updateStatusLog({ _purchaseRequested: false, _purchaseStatus: 'IN_PROGRESS' });
         try {
-          await purchaseData(page);
+          await purchaseData(page, context);
         } catch (purchaseErr) {
           console.error(`❌ Purchase failed: ${purchaseErr.message}`);
           sendAlert('❌ MTN GroupShare — Purchase Error', purchaseErr.message);
@@ -801,38 +820,25 @@ async function run() {
         continue;
       }
 
-      // ── Balance check — use estimate; re-anchor from portal every 45 minutes ──
-      if (!freshBalanceJustFetched) {
-        const log = loadStatusLog();
-        const lastChecked = log._lastBalanceCheckedAt ? new Date(log._lastBalanceCheckedAt).getTime() : 0;
-        const needsAnchor = (Date.now() - lastChecked) > BALANCE_ANCHOR_INTERVAL_MS;
-        let currentBalanceMB;
-        if (needsAnchor) {
-          const result = await checkBalance(page);
-          currentBalanceMB = result.totalMB;
-        } else {
-          currentBalanceMB = log._lastBalanceMB || 0;
-          console.log(`💰 Balance (estimated): ${log._lastBalance || 'Unknown'} (${currentBalanceMB.toFixed(2)} MB)`);
-        }
-        freshBalanceJustFetched = true;
-        const purchaseStatusNow = loadStatusLog()._purchaseStatus;
-        if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS') {
-          console.log(`💳 Balance is ≤ 90 GB (${(currentBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase before scanning files...`);
-          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(currentBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
-          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
-          try {
-            const purchaseSucceeded = await purchaseData(page);
-            if (purchaseSucceeded) {
-              updateStatusLog({ _balanceInsufficient: false });
-              console.log('🔄 Purchase complete — resuming scan...');
-            }
-          } catch (purchaseErr) {
-            console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
-            sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
-            updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+      // ── Balance check — always fetch real balance (direct API, no navigation overhead) ──
+      const { totalMB: currentBalanceMB } = await checkBalance(page, context);
+      const purchaseStatusNow = loadStatusLog()._purchaseStatus;
+      if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS') {
+        console.log(`💳 Balance is ≤ 90 GB (${(currentBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase before scanning files...`);
+        sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(currentBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+        try {
+          const purchaseSucceeded = await purchaseData(page, context);
+          if (purchaseSucceeded) {
+            updateStatusLog({ _balanceInsufficient: false });
+            console.log('🔄 Purchase complete — resuming scan...');
           }
-          continue;
+        } catch (purchaseErr) {
+          console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
+          sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
         }
+        continue;
       }
 
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
@@ -849,12 +855,6 @@ async function run() {
       idleCount = 0;
       console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
 
-      // Read current estimated balance for this batch
-      const batchLog = loadStatusLog();
-      let availableMB = batchLog._lastBalanceMB || 0;
-      let balanceText = batchLog._lastBalance || 'Unknown';
-      console.log(`💰 Balance (estimated): ${balanceText} (${availableMB.toFixed(2)} MB)`);
-
       const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
       let anyFileUploaded = false;
       let skippedDueToBalance = 0;
@@ -862,9 +862,12 @@ async function run() {
 
       for (let i = 0; i < pendingFiles.length; i++) {
 
-        // ── Step 1: Check if running balance is ≤ 90 GB before attempting next file ──
-        const purchaseStatusNow = loadStatusLog()._purchaseStatus;
-        if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusNow !== 'IN_PROGRESS') {
+        // ── Step 1: Fetch real balance before each file (API is instant, no navigation needed) ──
+        const { totalMB: availableMB, balanceText } = await checkBalance(page, context);
+
+        // ── Step 2: Check if balance is ≤ 90 GB before attempting next file ──
+        const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
+        if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS') {
           console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next file...`);
           sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
           updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
@@ -887,7 +890,7 @@ async function run() {
           }
         }
 
-        // ── Step 2: Check if this file fits the remaining balance (FCFS) ──
+        // ── Step 3: Check if this file fits the current balance (FCFS) ──
         const requiredMB = getExcelTotalMB(pendingFiles[i]);
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
         console.log(`📊 Required  : ${requiredMB.toFixed(2)} MB (${(requiredMB / 1024).toFixed(2)} GB)`);
@@ -899,7 +902,7 @@ async function run() {
           continue;
         }
 
-        // ── Step 3: Upload ──
+        // ── Step 4: Upload ──
         console.log(`✅ Balance sufficient — proceeding...`);
         const uploadResult = await uploadFile(page, pendingFiles[i]);
         if (uploadResult && uploadResult.blocked) {
@@ -911,27 +914,21 @@ async function run() {
           continue;
         }
 
-        // ── Step 4: Deduct this file's allocation from the estimated balance ──
-        // Only deduct when upload is confirmed DONE (uploadResult === true).
-        // Do NOT deduct for FAILED or TIMEOUT (uploadResult === false) — data was not allocated.
+        // ── Step 5: Post-upload handling ──
         if (uploadResult !== true) {
-          console.warn(`⚠️ Upload of "${pendingFiles[i].name}" did not confirm DONE — skipping balance deduction.`);
+          console.warn(`⚠️ Upload of "${pendingFiles[i].name}" did not confirm DONE — skipping to next file.`);
           continue;
         }
         anyFileUploaded = true;
         // Clear insufficient flag since we just successfully uploaded
         updateStatusLog({ _balanceInsufficient: false });
-        const { balanceText: updatedBalanceText, totalMB: updatedMB } = updateEstimatedBalance(requiredMB);
-        availableMB = updatedMB;
-        balanceText = updatedBalanceText;
-        console.log(`💰 Estimated balance after upload: ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
       }
 
       // Running balance hit ≤ 90 GB — purchase now then re-scan
       if (autoPurchaseTriggered) {
         let purchaseSucceeded = false;
         try {
-          purchaseSucceeded = await purchaseData(page);
+          purchaseSucceeded = await purchaseData(page, context);
         } catch (purchaseErr) {
           console.error(`❌ Auto-purchase failed: ${purchaseErr.message}`);
           sendAlert('❌ MTN GroupShare — Auto-Purchase Failed', purchaseErr.message);
@@ -946,7 +943,7 @@ async function run() {
 
       // All pending files were too large — none fit the available balance
       if (!anyFileUploaded && skippedDueToBalance > 0) {
-        const availableGB = (availableMB / 1024).toFixed(2);
+        const availableGB = ((loadStatusLog()._lastBalanceMB || 0) / 1024).toFixed(2);
         updateStatusLog({ _balanceInsufficient: true });
 
         // Cannot trigger a purchase here — MTN only allows purchase when balance < 90 GB.
@@ -958,10 +955,8 @@ async function run() {
         sendAlert('⚠️ MTN GroupShare — Queue Blocked', msg);
       }
 
-      console.log(`\n⏳ Batch complete. Checking actual balance then next scan in 1 min...`);
+      console.log(`\n⏳ Batch complete. Next scan in 1 min...`);
       await interruptibleSleep(IDLE_REFRESH_INTERVAL);
-      // Re-anchor balance from portal after the sleep (MTN may have finished processing)
-      await checkBalance(page);
     }
 
   } catch (err) {

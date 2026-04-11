@@ -463,13 +463,13 @@ app.get('/status/:filename', (req, res) => {
 });
 
 
-// GET /balance — return estimated balance instantly from status log.
-// Add ?refresh=true to trigger a real portal read (waits up to 25s for bot to respond).
+// GET /balance — return current balance from status log (refreshed each bot iteration).
+// Add ?refresh=true to force an immediate balance refresh (waits up to 25s for bot to respond).
 app.get('/balance', async (req, res) => {
   const wantRefresh = req.query.refresh === 'true';
 
   if (!wantRefresh) {
-    // Fast path — return estimated balance immediately
+    // Fast path — return current balance immediately from status log
     const log = loadStatusLog();
     let cacheAge = null;
     if (log._lastBalanceCheckedAt) {
@@ -546,8 +546,8 @@ app.get('/balance', async (req, res) => {
   }
 
   const note = busyFile
-    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Estimated value is from ${cacheAge || 'an earlier check'}.`
-    : `Bot did not respond within 25 s. Estimated value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
+    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Last known value is from ${cacheAge || 'an earlier check'}.`
+    : `Bot did not respond within 25 s. Last known value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
 
   return res.json({
     success: true,
