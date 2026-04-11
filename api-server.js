@@ -282,10 +282,9 @@ function queueFullResponse(res, pendingMB) {
 
 // POST /upload — accept an Excel file from external app
 app.post('/upload', (req, res, next) => {
-  // Balance & capacity checks BEFORE multer writes the file to disk
+  // Capacity check BEFORE multer writes the file to disk
   const statusLog = loadStatusLog();
   const uploadedLog = loadUploadedLog();
-  if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
   const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog);
   if (pendingMB > QUEUE_THRESHOLD_MB) return queueFullResponse(res, pendingMB);
   next();
@@ -337,7 +336,6 @@ app.post('/upload-base64', (req, res) => {
     const newFileMB = getFileTotalMBFromBuffer(buffer);
     const statusLog = loadStatusLog();
     const uploadedLog = loadUploadedLog();
-    if (statusLog._balanceInsufficient) return balanceInsufficientResponse(res, statusLog._lastBalanceMB || 0);
     const availableMB = statusLog._lastBalanceMB || 0;
     if (newFileMB > 0 && availableMB > 0 && newFileMB > availableMB) {
       return fileExceedsBalanceResponse(res, newFileMB, availableMB);
