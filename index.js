@@ -853,7 +853,17 @@ async function run() {
       }
 
       idleCount = 0;
-      console.log(`\n📂 ${pendingFiles.length} new file(s) detected!`);
+
+      // Pre-compute totalMB for every file (uses cache — only parses XLSX on first encounter)
+      // then sort largest-first (First Fit Decreasing) so the biggest allocations drain the
+      // balance first; smaller files fill the remaining gap when balance is low.
+      for (const f of pendingFiles) f.totalMB = getExcelTotalMB(f);
+      pendingFiles.sort((a, b) => b.totalMB - a.totalMB);
+
+      console.log(`\n📂 ${pendingFiles.length} file(s) queued (largest-first):`);
+      pendingFiles.forEach((f, idx) =>
+        console.log(`   ${idx + 1}. ${f.name} — ${(f.totalMB / 1024).toFixed(2)} GB`)
+      );
 
       const AUTO_PURCHASE_THRESHOLD_MB = 90 * 1024;
       let anyFileUploaded = false;
@@ -898,8 +908,8 @@ async function run() {
           }
         }
 
-        // ── Step 3: Check if this file fits the current balance (FCFS) ──
-        const requiredMB = getExcelTotalMB(pendingFiles[i]);
+        // ── Step 3: Check if this file fits the current balance ──
+        const requiredMB = pendingFiles[i].totalMB; // already computed above
         console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
         console.log(`📊 Required  : ${requiredMB.toFixed(2)} MB (${(requiredMB / 1024).toFixed(2)} GB)`);
 

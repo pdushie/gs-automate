@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MTN GroupShare — Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0f172a;
+      --surface:   #1e293b;
+      --surface2:  #243251;
+      --border:    #334155;
+      --text:      #f1f5f9;
+      --muted:     #94a3b8;
+      --accent:    #ffcb00;
+      --accent-bg: rgba(255,203,0,0.11);
+      --green:     #22c55e;
+      --blue:      #3b82f6;
+      --orange:    #f97316;
+      --red:       #ef4444;
+      --r:         10px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    body::before {
+      content: '';
+      display: block;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent) 0%, rgba(255,203,0,0.2) 100%);
+    }
+
+    .wrap {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 22px 18px 40px;
+    }
+
+    /* ── Header ── */
+    .hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 26px;
+      flex-wrap: wrap;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-pill {
+      background: var(--accent);
+      color: #000;
+      font-weight: 800;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .brand-name {
+      font-size: 1.1rem;
+      font-weight: 700;
+    }
+
+    .hdr-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+
+    .ts {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .btn {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 14px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      transition: background 0.15s, border-color 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .btn:hover               { background: var(--surface2); border-color: #4a5c76; }
+    .btn:disabled            { opacity: 0.45; cursor: default; }
+    .btn.btn-warn            { border-color: var(--orange); color: var(--orange); }
+    .btn.btn-warn:hover      { background: rgba(249,115,22,0.08); }
+
+    /* ── Stats ── */
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 18px 20px;
+    }
+
+    .card.accent { border-color: rgba(255,203,0,0.55); }
+
+    .card-lbl {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .card-val {
+      font-size: 1.8rem;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--text);
+    }
+
+    .card.accent .card-val { color: var(--accent); }
+
+    .card-sub {
+      margin-top: 7px;
+      font-size: 0.74rem;
+      color: var(--muted);
+    }
+
+    /* health dot */
+    .dot {
+      display: inline-block;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.green  { background: var(--green);  box-shadow: 0 0 7px var(--green); }
+    .dot.yellow { background: var(--accent); box-shadow: 0 0 7px var(--accent); }
+    .dot.red    { background: var(--red);    box-shadow: 0 0 7px var(--red); }
+    .dot.gray   { background: var(--muted); }
+
+    /* ── Banner ── */
+    .banner {
+      display: none;
+      align-items: center;
+      gap: 9px;
+      border-radius: var(--r);
+      padding: 11px 16px;
+      margin-bottom: 16px;
+      font-size: 0.84rem;
+    }
+    .banner.info  { display: flex; background: rgba(59,130,246,0.1);  border: 1px solid rgba(59,130,246,0.35); color: #93c5fd; }
+    .banner.warn  { display: flex; background: rgba(249,115,22,0.1);  border: 1px solid rgba(249,115,22,0.35); color: #fdba74; }
+    .banner.error { display: flex; background: rgba(239,68,68,0.1);   border: 1px solid rgba(239,68,68,0.35);  color: #fca5a5; }
+
+    /* ── Search ── */
+    .search-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+
+    .search-row { display: flex; gap: 8px; }
+
+    .sinp {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 9px 14px 9px 36px;
+      color: var(--text);
+      font-size: 0.875rem;
+      outline: none;
+      min-width: 0;
+      transition: border-color 0.15s;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cline x1='21' y1='21' x2='16.65' y2='16.65'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: 10px center;
+    }
+    .sinp:focus        { border-color: var(--accent); }
+    .sinp::placeholder { color: var(--muted); }
+
+    .search-hint {
+      margin-top: 8px;
+      font-size: 0.74rem;
+      color: var(--muted);
+      min-height: 16px;
+    }
+
+    /* ── Files panel ── */
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      overflow: hidden;
+    }
+
+    .panel-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+
+    .panel-title { font-weight: 600; font-size: 0.88rem; }
+
+    .tabs { display: flex; gap: 3px; flex-wrap: wrap; }
+
+    .tab {
+      background: none;
+      border: 1px solid transparent;
+      color: var(--muted);
+      padding: 3px 11px;
+      border-radius: 20px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      font-weight: 500;
+      transition: all 0.14s;
+      white-space: nowrap;
+    }
+    .tab:hover         { color: var(--text); }
+    .tab.active        { background: var(--accent-bg); border-color: rgba(255,203,0,0.5); color: var(--accent); }
+
+    /* ── Table ── */
+    .tbl-wrap { overflow-x: auto; }
+
+    table { width: 100%; border-collapse: collapse; }
+
+    thead th {
+      text-align: left;
+      padding: 8px 16px;
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid rgba(51,65,85,0.35);
+      transition: background 0.1s;
+      cursor: default;
+    }
+    tbody tr:hover      { background: var(--surface2); }
+    tbody tr:last-child { border-bottom: none; }
+
+    td {
+      padding: 10px 16px;
+      vertical-align: middle;
+    }
+
+    /* expandable detail row */
+    .detail-row { display: none; }
+    .detail-row.open { display: table-row; }
+    .detail-row td {
+      padding: 0 16px 12px 16px;
+      background: var(--surface2);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .detail-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      padding: 10px 0;
+      border-top: 1px solid var(--border);
+    }
+    .detail-item strong { color: var(--text); display: block; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 2px; }
+
+    .fname {
+      font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      font-size: 0.77rem;
+      max-width: 260px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      display: block;
+    }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-block;
+      padding: 2px 9px;
+      border-radius: 20px;
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .bPENDING     { background: rgba(59,130,246,0.14);  color: #93c5fd; }
+    .bIN_PROGRESS { background: rgba(255,203,0,0.14);   color: #fde68a; }
+    .bPROCESSING  { background: rgba(249,115,22,0.14);  color: #fdba74; }
+    .bDONE        { background: rgba(34,197,94,0.14);   color: #86efac; }
+    .bFAILED      { background: rgba(239,68,68,0.14);   color: #fca5a5; }
+    .bABANDONED   { background: rgba(100,116,139,0.14); color: #94a3b8; }
+    .bTIMEOUT     { background: rgba(249,115,22,0.10);  color: #fdba74; }
+
+    /* ── Order pills ── */
+    .pill {
+      display: inline-block;
+      background: rgba(148,163,184,0.07);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 7px;
+      font-size: 0.71rem;
+      font-family: ui-monospace, Consolas, monospace;
+      color: var(--muted);
+      margin: 1px 2px 1px 0;
+      transition: background 0.1s;
+    }
+    .pill.hl {
+      background: rgba(255,203,0,0.13);
+      border-color: rgba(255,203,0,0.45);
+      color: var(--accent);
+    }
+
+    /* ── Misc ── */
+    .empty-cell {
+      text-align: center;
+      padding: 48px 16px;
+      color: var(--muted);
+      font-size: 0.875rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin {
+      display: inline-block;
+      width: 13px; height: 13px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+
+    mark {
+      background: rgba(255,203,0,0.22);
+      color: var(--accent);
+      border-radius: 2px;
+      padding: 0 1px;
+    }
+
+    .num-badge {
+      display: inline-block;
+      background: rgba(148,163,184,0.12);
+      border-radius: 10px;
+      padding: 0 7px;
+      font-size: 0.72rem;
+      margin-left: 5px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    /* queue position column */
+    .qpos {
+      font-size: 0.72rem;
+      font-weight: 700;
+      font-family: ui-monospace, Consolas, monospace;
+      white-space: nowrap;
+      color: var(--muted);
+    }
+    .qpos-next {
+      color: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .qpos-active {
+      color: var(--green);
+      font-size: 0.8rem;
+    }
+
+    /* next-in-line row highlight */
+    .row-next > td:first-child { border-left: 3px solid var(--accent); }
+    .row-next > td:first-child .qpos { padding-left: 3px; }
+
+    /* next-in-line callout strip */
+    .next-strip {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      background: rgba(255,203,0,0.06);
+      border: 1px solid rgba(255,203,0,0.25);
+      border-radius: var(--r);
+      padding: 11px 16px;
+      margin-bottom: 16px;
+      font-size: 0.82rem;
+    }
+    .next-strip.visible { display: flex; }
+    .next-strip-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      flex-shrink: 0;
+    }
+    .next-strip-name {
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.8rem;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .next-strip-size {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: var(--muted);
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <header class="hdr">
+    <div class="brand">
+      <span class="brand-pill">MTN</span>
+      <span class="brand-name">GroupShare Dashboard</span>
+    </div>
+    <div class="hdr-right">
+      <span class="ts" id="ts">—</span>
+      <button class="btn" id="refreshBtn" onclick="doRefresh()">
+        <span id="rIcon">↻</span> Refresh
+      </button>
+      <button class="btn btn-warn" onclick="logout()" title="Sign out">
+        ⭳ Sign out
+      </button>
+    </div>
+  </header>
+
+  <!-- Stats row -->
+  <div class="stats">
+    <div class="card accent">
+      <div class="card-lbl">Data Balance</div>
+      <div class="card-val" id="balVal">—</div>
+      <div class="card-sub" id="balSub">Loading…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-lbl">Queue</div>
+      <div class="card-val" id="queueVal">—</div>
+      <div class="card-sub" id="queueSub">Loading…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-lbl">Processed</div>
+      <div class="card-val" id="doneVal">—</div>
+      <div class="card-sub" id="doneSub">Loading…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-lbl">System Health</div>
+      <div class="card-val" style="font-size:0.88rem;padding-top:5px">
+        <span style="display:flex;align-items:center;gap:7px">
+          <span class="dot gray" id="hDot"></span>
+          <span id="hText">Checking…</span>
+        </span>
+      </div>
+      <div class="card-sub" id="hSub">—</div>
+    </div>
+  </div>
+
+  <!-- Banner -->
+  <div class="banner" id="banner"></div>
+
+  <!-- Next in Line strip -->
+  <div class="next-strip" id="nextStrip">
+    <span class="next-strip-label">▶ Next in line</span>
+    <span class="next-strip-name" id="nextName">—</span>
+    <span class="next-strip-size" id="nextSize"></span>
+  </div>
+
+  <!-- Search -->
+  <div class="search-card">
+    <div class="search-row">
+      <input
+        class="sinp"
+        id="sinp"
+        type="text"
+        placeholder="Search by order ID or filename…"
+        oninput="onSearch()"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button class="btn" id="clrBtn" style="display:none" onclick="clearSearch()">✕ Clear</button>
+    </div>
+    <div class="search-hint" id="hint"></div>
+  </div>
+
+  <!-- Files panel -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <span class="panel-title">Files <span class="num-badge" id="totalBadge">0</span></span>
+      <div class="tabs">
+        <button class="tab active" data-f="ALL"       onclick="setTab(this)">All</button>
+        <button class="tab"        data-f="PENDING"   onclick="setTab(this)">Pending</button>
+        <button class="tab"        data-f="ACTIVE"    onclick="setTab(this)">Active</button>
+        <button class="tab"        data-f="DONE"      onclick="setTab(this)">Done</button>
+        <button class="tab"        data-f="FAILED"    onclick="setTab(this)">Failed</button>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:36px">#</th>
+            <th>Status</th>
+            <th>Filename</th>
+            <th>Allocation</th>
+            <th>Order ID(s)</th>
+            <th>Queued</th>
+            <th>Completed</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="8" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+/* ── State ───────────────────────────────── */
+let allFiles  = [];
+let tabFilter = 'ALL';
+let cdSecs    = 30;
+let cdTimer   = null;
+
+/* ── Formatting ──────────────────────────── */
+function fmtMB(mb) {
+  if (!mb && mb !== 0) return '—';
+  if (mb >= 1024 * 1024) return (mb / (1024 * 1024)).toFixed(2) + ' TB';
+  if (mb >= 1024)        return (mb / 1024).toFixed(2) + ' GB';
+  return mb.toFixed(0) + ' MB';
+}
+
+function fmtGB(gb) {
+  if (gb == null) return '—';
+  if (gb >= 1024) return (gb / 1024).toFixed(2) + ' TB';
+  return gb.toFixed(2) + ' GB';
+}
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d   = new Date(iso);
+  const now = new Date();
+  const ms  = now - d;
+  if (ms < 0)             return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  if (ms < 60_000)        return 'just now';
+  if (ms < 3_600_000)     return Math.round(ms / 60_000) + 'm ago';
+  if (ms < 86_400_000)    return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  return d.toLocaleDateString([], { month:'short', day:'numeric' }) + ' ' +
+         d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+}
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function hl(text, q) {
+  if (!q || text == null) return esc(text ?? '');
+  const lo = text.toLowerCase(), ql = q.toLowerCase();
+  const i  = lo.indexOf(ql);
+  if (i === -1) return esc(text);
+  return esc(text.slice(0, i)) +
+    `<mark>${esc(text.slice(i, i + q.length))}</mark>` +
+    esc(text.slice(i + q.length));
+}
+
+// Strip server-added timestamp suffix: "Name-2026-04-07T00-32-29-843Z.xlsx" → "Name.xlsx"
+function dname(filename) {
+  const dot  = filename.lastIndexOf('.');
+  const ext  = dot > -1 ? filename.slice(dot) : '';
+  const base = dot > -1 ? filename.slice(0, dot) : filename;
+  return base.replace(/-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d+Z$/, '') + ext;
+}
+
+/* ── Status helpers ──────────────────────── */
+const BADGE_MAP = {
+  PENDING:     ['bPENDING',     'Pending'],
+  IN_PROGRESS: ['bIN_PROGRESS', 'In Progress'],
+  PROCESSING:  ['bPROCESSING',  'Processing'],
+  DONE:        ['bDONE',        'Done'],
+  FAILED:      ['bFAILED',      'Failed'],
+  ABANDONED:   ['bABANDONED',   'Abandoned'],
+  TIMEOUT:     ['bTIMEOUT',     'Timeout'],
+};
+
+function badge(status) {
+  const [cls, label] = BADGE_MAP[status] || ['bPENDING', status || 'Pending'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function tabGroup(status) {
+  if (!status || status === 'PENDING') return 'PENDING';
+  if (['IN_PROGRESS','PROCESSING','TIMEOUT'].includes(status)) return 'ACTIVE';
+  if (status === 'DONE')                                       return 'DONE';
+  if (['FAILED','ABANDONED'].includes(status))                 return 'FAILED';
+  return 'PENDING';
+}
+
+const SORT = { IN_PROGRESS:0, PROCESSING:1, PENDING:2, TIMEOUT:3, DONE:4, FAILED:5, ABANDONED:6 };
+
+/* ── Fetch ───────────────────────────────── */
+async function fetchSummary() {
+  const r = await fetch('/summary');
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+/* ── Render stats cards ──────────────────── */
+function renderStats(d) {
+  const { balance, queue, purchase, disk } = d;
+
+  // Balance
+  document.getElementById('balVal').textContent = fmtMB(balance.mb);
+  if (balance.checkedAt) {
+    const ageMins = Math.round((Date.now() - new Date(balance.checkedAt)) / 60_000);
+    document.getElementById('balSub').textContent =
+      ageMins < 1 ? 'Updated just now' : `Updated ${ageMins} min ago`;
+  } else {
+    document.getElementById('balSub').textContent = 'No balance reading yet';
+  }
+
+  // Queue
+  const active = queue.pending + queue.active;
+  document.getElementById('queueVal').textContent = active;
+  document.getElementById('queueSub').textContent = `${fmtMB(queue.pendingMB)} pending allocation`;
+
+  // Next in line strip
+  const strip    = document.getElementById('nextStrip');
+  const nextFile = d.files && queue.nextInLine
+    ? d.files.find(f => f.filename === queue.nextInLine)
+    : null;
+  if (queue.nextInLine && queue.active === 0) {
+    strip.classList.add('visible');
+    document.getElementById('nextName').textContent = dname(queue.nextInLine);
+    document.getElementById('nextSize').textContent = nextFile && nextFile.totalDataGB != null
+      ? fmtGB(nextFile.totalDataGB) : '';
+  } else if (queue.active > 0 && queue.nextInLine) {
+    // Something is already uploading — show what’s after it
+    strip.classList.add('visible');
+    document.getElementById('nextName').textContent = `Uploading now — then: ${dname(queue.nextInLine)}`;
+    document.getElementById('nextSize').textContent = nextFile && nextFile.totalDataGB != null
+      ? fmtGB(nextFile.totalDataGB) : '';
+  } else if (queue.active > 0) {
+    strip.classList.add('visible');
+    document.getElementById('nextName').textContent = 'Upload in progress…';
+    document.getElementById('nextSize').textContent = '';
+  } else {
+    strip.classList.remove('visible');
+  }
+
+  // Done
+  document.getElementById('doneVal').textContent = queue.done;
+  document.getElementById('doneSub').textContent =
+    queue.failed > 0 ? `${queue.failed} failed / abandoned` : 'no failures';
+
+  // Health
+  const dot  = document.getElementById('hDot');
+  const htxt = document.getElementById('hText');
+  const hsub = document.getElementById('hSub');
+
+  if (balance.checkedAt) {
+    const ageMins = (Date.now() - new Date(balance.checkedAt)) / 60_000;
+    if (ageMins < 5) {
+      dot.className = 'dot green';  htxt.textContent = 'Bot alive';
+    } else if (ageMins < 15) {
+      dot.className = 'dot yellow'; htxt.textContent = 'Bot slow';
+    } else {
+      dot.className = 'dot red';    htxt.textContent = 'Bot stalled';
+    }
+    const m = Math.round(ageMins);
+    hsub.textContent = ageMins < 1 ? 'Balance checked just now' : `Balance checked ${m} min ago`;
+  } else {
+    dot.className = 'dot gray';
+    htxt.textContent = 'No data yet';
+    hsub.textContent = 'Waiting for first balance read';
+  }
+
+  if (disk) {
+    hsub.textContent += ` · Disk ${disk.usedMB} MB / ${disk.limitMB} MB`;
+  }
+
+  // Banner
+  const banner = document.getElementById('banner');
+  if (purchase.status === 'IN_PROGRESS') {
+    banner.className = 'banner info';
+    banner.innerHTML = '<span class="spin"></span> &nbsp;Data bundle purchase in progress…';
+  } else if (purchase.status === 'FAILED') {
+    banner.className = 'banner error';
+    banner.innerHTML = `❌ &nbsp;Last purchase failed: ${esc(purchase.note || 'Unknown error')}`;
+  } else if (purchase.status === 'DONE' && purchase.completedAt) {
+    const age = (Date.now() - new Date(purchase.completedAt)) / 60_000;
+    if (age < 10) {
+      banner.className = 'banner info';
+      banner.innerHTML = `✅ &nbsp;Data bundle purchased successfully`;
+    } else { banner.className = 'banner'; }
+  } else {
+    banner.className = 'banner';
+  }
+}
+
+/* ── Render table ────────────────────────── */
+function renderTable(files, q) {
+  const tbody = document.getElementById('tbody');
+
+  if (!files.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${
+      q ? `🔍 No files match &ldquo;<strong>${esc(q)}</strong>&rdquo;` : '📭 No files to show'
+    }</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = files.map((f, idx) => {
+    const status  = f.status || 'PENDING';
+    const ids     = f.orderIds || (f.orderId != null ? [f.orderId] : []);
+    const dn      = dname(f.filename);
+    const detId   = `det-${idx}`;
+    const isNext  = f.queuePosition === 1;
+
+    // Queue position cell
+    let qposHtml;
+    if (f.queuePosition === 0) {
+      qposHtml = `<span class="qpos qpos-active" title="Currently uploading">▶</span>`;
+    } else if (isNext) {
+      qposHtml = `<span class="qpos qpos-next" title="Next in line">▶ <span>#1</span></span>`;
+    } else if (f.queuePosition > 1) {
+      qposHtml = `<span class="qpos">#${f.queuePosition}</span>`;
+    } else {
+      qposHtml = `<span class="qpos" style="opacity:0.3">—</span>`;
+    }
+
+    const pillsHtml = ids.length
+      ? ids.map(id => {
+          const s   = String(id);
+          const isH = q && s.toLowerCase().includes(q.toLowerCase());
+          return `<span class="pill${isH ? ' hl' : ''}">${esc(s)}</span>`;
+        }).join('')
+      : '<span style="color:var(--muted)">—</span>';
+
+    const completedIso = f.completedAt || f.failedAt || f.timedOutAt || null;
+
+    // Detail content
+    const details = [
+      ['Full filename',   f.filename],
+      ['Queue position',  f.queuePosition != null ? (f.queuePosition === 0 ? 'Currently active' : `#${f.queuePosition}`) : '—'],
+      ['Started',         f.startedAt   ? fmtDate(f.startedAt)  + ' (' + new Date(f.startedAt).toLocaleString() + ')' : '—'],
+      ['Completed',       completedIso  ? fmtDate(completedIso) + ' (' + new Date(completedIso).toLocaleString() + ')' : '—'],
+      ['Retry count',     f.retryCount  ? String(f.retryCount) : '0'],
+    ].map(([k, v]) => `<div class="detail-item"><strong>${k}</strong>${esc(v)}</div>`).join('');
+
+    return `
+    <tr class="${isNext ? 'row-next' : ''}" onclick="toggleDetail('${detId}')">
+      <td>${qposHtml}</td>
+      <td>${badge(status)}</td>
+      <td><span class="fname" title="${esc(f.filename)}">${hl(dn, q)}</span></td>
+      <td style="white-space:nowrap;font-size:0.78rem">${esc(fmtGB(f.totalDataGB))}</td>
+      <td>${pillsHtml}</td>
+      <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(f.queuedAt))}</td>
+      <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(completedIso))}</td>
+      <td style="color:var(--muted);font-size:0.75rem;padding-right:12px">▾</td>
+    </tr>
+    <tr class="detail-row" id="${detId}">
+      <td colspan="8"><div class="detail-inner">${details}</div></td>
+    </tr>`;
+  }).join('');
+}
+
+function toggleDetail(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+/* ── Filter & search ─────────────────────── */
+function applyView() {
+  const q = (document.getElementById('sinp').value || '').trim();
+  document.getElementById('clrBtn').style.display = q ? 'inline-flex' : 'none';
+
+  let list = allFiles;
+
+  // Tab filter
+  if (tabFilter !== 'ALL') {
+    list = list.filter(f => tabGroup(f.status || 'PENDING') === tabFilter);
+  }
+
+  // Text search: order IDs + display filename
+  if (q) {
+    const ql = q.toLowerCase();
+    list = list.filter(f => {
+      if (f.filename && dname(f.filename).toLowerCase().includes(ql)) return true;
+      if (f.orderId  != null && String(f.orderId).toLowerCase().includes(ql)) return true;
+      if (f.orderIds && f.orderIds.some(id => String(id).toLowerCase().includes(ql))) return true;
+      return false;
+    });
+  }
+
+  // Sort: active/next first, then by queue position within pending, then by status
+  list = [...list].sort((a, b) => {
+    const sa = SORT[a.status] ?? 9;
+    const sb = SORT[b.status] ?? 9;
+    if (sa !== sb) return sa - sb;
+    // Within the same status group, sort by FFD queue position
+    const pa = a.queuePosition ?? 999;
+    const pb = b.queuePosition ?? 999;
+    return pa - pb;
+  });
+
+  // Badge count on panel title
+  document.getElementById('totalBadge').textContent = list.length;
+
+  // Search hint
+  const hint = document.getElementById('hint');
+  if (q) {
+    hint.textContent = `${list.length} result${list.length !== 1 ? 's' : ''} for "${q}"`;
+  } else {
+    hint.textContent = '';
+  }
+
+  renderTable(list, q);
+}
+
+function onSearch() { applyView(); }
+
+function clearSearch() {
+  document.getElementById('sinp').value = '';
+  applyView();
+}
+
+function setTab(btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  btn.classList.add('active');
+  tabFilter = btn.dataset.f;
+  applyView();
+}
+
+/* ── Refresh ─────────────────────────────── */
+async function doRefresh() {
+  const btn  = document.getElementById('refreshBtn');
+  const icon = document.getElementById('rIcon');
+  btn.disabled = true;
+  icon.innerHTML = '<span class="spin" style="width:11px;height:11px;border-width:2px"></span>';
+
+  try {
+    const d = await fetchSummary();
+    if (d.files) allFiles = d.files;
+    renderStats(d);
+    applyView();
+
+    const t = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    document.getElementById('ts').textContent = `Updated ${t}`;
+  } catch (e) {
+    console.error('Refresh failed:', e);
+    document.getElementById('ts').textContent = 'Refresh failed';
+  }
+
+  btn.disabled    = false;
+  icon.textContent = '↻';
+  cdSecs = 30;
+}
+
+/* ── Countdown ───────────────────────────── */
+function startCountdown() {
+  clearInterval(cdTimer);
+  cdTimer = setInterval(() => {
+    cdSecs--;
+    if (cdSecs <= 0) {
+      cdSecs = 30;
+      doRefresh();
+    }
+  }, 1000);
+}
+
+/* ── Auth ────────────────────────────────── */
+function logout() {
+  fetch('/auth/logout', { method: 'POST' })
+    .catch(() => {})
+    .finally(() => { window.location.href = '/login'; });
+}
+
+// Verify session is still valid every 5 minutes; redirect to login if expired
+function checkSession() {
+  fetch('/auth/status')
+    .then(r => r.json())
+    .then(d => { if (d.authRequired && !d.authenticated) window.location.href = '/login'; })
+    .catch(() => {});
+}
+
+/* ── Boot ────────────────────────────────── */
+doRefresh().then(startCountdown);
+setInterval(checkSession, 5 * 60 * 1000);
+</script>
+</body>
+</html>

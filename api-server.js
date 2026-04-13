@@ -6,6 +6,8 @@ const fs = require('fs');
 const XLSX = require('xlsx');
 require('dotenv').config();
 const { withFileLock, atomicWrite } = require('./lock');
+const crypto      = require('crypto');
+const TelegramBot = require('node-telegram-bot-api');
 
 
 const app = express();
@@ -19,6 +21,66 @@ const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
 const QUEUE_CAPACITY_MB  = 1.5 * 1024 * 1024;               // 1.5 TB — displayed capacity
 const QUEUE_THRESHOLD_MB = QUEUE_CAPACITY_MB - (10 * 1024);  // 1.49 TB — reject when pending exceeds this
+
+
+// ── AUTH ─────────────────────────────────────────────────
+// Dashboard access is protected by a Telegram-delivered OTP.
+// If TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set, auth is bypassed (dev mode).
+const tgAuthBot    = process.env.TELEGRAM_BOT_TOKEN ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false }) : null;
+const tgAuthChatId = process.env.TELEGRAM_CHAT_ID   || null;
+
+// In-memory stores — reset on process restart (forces re-login, no db dependency)
+const _otpStore     = new Map(); // 'global' -> { code, expiresAt, used }
+const _sessionStore = new Map(); // token     -> expiresAt
+const _rateStore    = new Map(); // ip        -> timestamps[]
+
+const OTP_TTL_MS     =  5 * 60 * 1000;      // 5 minutes
+const SESSION_TTL_MS =  8 * 60 * 60 * 1000; // 8 hours
+const RATE_MAX       = 3;
+const RATE_WIN_MS    = 15 * 60 * 1000;      // 15 minutes
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of _otpStore)     if (v.expiresAt < now) _otpStore.delete(k);
+  for (const [k, v] of _sessionStore) if (v < now)           _sessionStore.delete(k);
+  for (const [k, ts] of _rateStore) {
+    const fresh = ts.filter(t => now - t < RATE_WIN_MS);
+    if (!fresh.length) _rateStore.delete(k); else _rateStore.set(k, fresh);
+  }
+}, 60_000);
+
+function getClientIp(req) {
+  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
+}
+
+function parseCookies(req) {
+  const result = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const idx = part.indexOf('=');
+    if (idx < 0) continue;
+    const k = part.slice(0, idx).trim();
+    const v = part.slice(idx + 1).trim();
+    try { result[k] = decodeURIComponent(v); } catch { result[k] = v; }
+  }
+  return result;
+}
+
+function isAuthenticated(req) {
+  if (!tgAuthBot || !tgAuthChatId) return true; // auth disabled — no bot configured
+  const token  = parseCookies(req)['gs_session'];
+  if (!token) return false;
+  const expiry = _sessionStore.get(token);
+  if (!expiry || Date.now() > expiry) { _sessionStore.delete(token); return false; }
+  return true;
+}
+
+function requireAuth(req, res, next) {
+  if (isAuthenticated(req)) return next();
+  const wantsJson = (req.headers.accept || '').includes('application/json')
+                 || (req.headers['content-type'] || '').includes('json');
+  if (wantsJson) return res.status(401).json({ success: false, error: 'UNAUTHORIZED' });
+  res.redirect('/login');
+}
 
 
 // Auto-create upload folder if it doesn't exist
@@ -288,6 +350,103 @@ function queueFullResponse(res, pendingMB) {
 
 // ── ROUTES ────────────────────────────────────────────────
 
+// GET / — dashboard (requires authentication)
+app.get('/', requireAuth, (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// GET /login — login page (public)
+app.get('/login', (req, res) => {
+  if (isAuthenticated(req)) return res.redirect('/');
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+
+// ── AUTH ROUTES ───────────────────────────────────────────
+
+// POST /auth/request-otp — generate a 6-digit OTP and send it to Telegram
+app.post('/auth/request-otp', (req, res) => {
+  if (!tgAuthBot || !tgAuthChatId) {
+    return res.json({ success: true, note: 'Auth not configured — access is open' });
+  }
+
+  const ip  = getClientIp(req);
+  const now = Date.now();
+  const hits = (_rateStore.get(ip) || []).filter(t => now - t < RATE_WIN_MS);
+  if (hits.length >= RATE_MAX) {
+    const retryAfterSecs = Math.ceil((hits[0] + RATE_WIN_MS - now) / 1000);
+    return res.status(429)
+      .set('Retry-After', String(retryAfterSecs))
+      .json({ success: false, error: 'TOO_MANY_REQUESTS', retryAfterSeconds: retryAfterSecs });
+  }
+  hits.push(now);
+  _rateStore.set(ip, hits);
+
+  const code      = String(crypto.randomInt(100_000, 999_999));
+  const expiresAt = now + OTP_TTL_MS;
+  _otpStore.set('global', { code, expiresAt, used: false });
+
+  const text = `🔐 *MTN GroupShare Dashboard*\n\nYour sign-in code:\n\`${code}\`\n\n_Valid for 5 minutes. Do not share this code._`;
+  tgAuthBot.sendMessage(tgAuthChatId, text, { parse_mode: 'Markdown' })
+    .then(() => {
+      console.log(`🔑 OTP sent via Telegram (ip: ${ip})`);
+      res.json({ success: true });
+    })
+    .catch(err => {
+      console.error(`❌ OTP Telegram send failed: ${err.message}`);
+      _otpStore.delete('global');
+      res.status(500).json({ success: false, error: 'Failed to deliver OTP. Check bot configuration.' });
+    });
+});
+
+// POST /auth/verify — validate OTP, issue httpOnly session cookie
+app.post('/auth/verify', (req, res) => {
+  if (!tgAuthBot || !tgAuthChatId) {
+    const token = crypto.randomBytes(32).toString('hex');
+    _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+    res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
+    return res.json({ success: true });
+  }
+
+  const submitted = String(req.body.otp || '').replace(/\D/g, '').slice(0, 6);
+  if (!submitted) return res.status(400).json({ success: false, error: 'OTP is required' });
+
+  const record = _otpStore.get('global');
+  if (!record || record.used || Date.now() > record.expiresAt) {
+    return res.status(401).json({ success: false, error: 'Code expired or not found. Request a new one.' });
+  }
+
+  // Constant-time comparison — prevents timing side-channel attacks
+  const a = Buffer.from(submitted.padEnd(10, '0'));
+  const b = Buffer.from(record.code.padEnd(10, '0'));
+  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);
+
+  if (!valid) {
+    console.warn(`⚠️  Invalid OTP attempt from ${getClientIp(req)}`);
+    return res.status(401).json({ success: false, error: 'Incorrect code. Please try again.' });
+  }
+
+  record.used = true; // single-use
+  const token = crypto.randomBytes(32).toString('hex');
+  _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+  res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
+  console.log(`✅ Dashboard login — session issued (ip: ${getClientIp(req)})`);
+  res.json({ success: true });
+});
+
+// POST /auth/logout — invalidate session cookie
+app.post('/auth/logout', (req, res) => {
+  const token = parseCookies(req)['gs_session'];
+  if (token) _sessionStore.delete(token);
+  res.clearCookie('gs_session');
+  res.redirect('/login');
+});
+
+// GET /auth/status — lets the UI detect session expiry without a full page reload
+app.get('/auth/status', (req, res) => {
+  res.json({ authenticated: isAuthenticated(req), authRequired: !!(tgAuthBot && tgAuthChatId) });
+});
+
 
 // POST /upload — accept an Excel file from external app
 app.post('/upload', (req, res, next) => {
@@ -410,7 +569,7 @@ function getExcelStats(filePath) {
 }
 
 // GET /status — get status of all files
-app.get('/status', (req, res) => {
+app.get('/status', requireAuth, (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
@@ -437,7 +596,7 @@ app.get('/status', (req, res) => {
 
 
 // GET /status/:filename — get status of a specific file
-app.get('/status/:filename', (req, res) => {
+app.get('/status/:filename', requireAuth, (req, res) => {
   const { filename } = req.params;
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
@@ -465,7 +624,7 @@ app.get('/status/:filename', (req, res) => {
 
 // GET /balance — return current balance from status log (refreshed each bot iteration).
 // Add ?refresh=true to force an immediate balance refresh (waits up to 25s for bot to respond).
-app.get('/balance', async (req, res) => {
+app.get('/balance', requireAuth, async (req, res) => {
   const wantRefresh = req.query.refresh === 'true';
 
   if (!wantRefresh) {
@@ -562,7 +721,7 @@ app.get('/balance', async (req, res) => {
 
 
 // POST /purchase — trigger a data bundle purchase on the bot
-app.post('/purchase', (req, res) => {
+app.post('/purchase', requireAuth, (req, res) => {
   withFileLock(STATUS_LOG, () => {
     const statusLog = loadStatusLog();
     saveStatusLog({ ...statusLog, _purchaseRequested: true, _purchaseStatus: 'PENDING', _purchaseRequestedAt: new Date().toISOString() });
@@ -572,7 +731,7 @@ app.post('/purchase', (req, res) => {
 });
 
 // GET /purchase-status — check the current state of a purchase request
-app.get('/purchase-status', (req, res) => {
+app.get('/purchase-status', requireAuth, (req, res) => {
   const log = loadStatusLog();
   return res.json({
     status: log._purchaseStatus || 'IDLE',
@@ -584,7 +743,7 @@ app.get('/purchase-status', (req, res) => {
 
 
 // GET /disk — get current disk usage of the upload folder
-app.get('/disk', (req, res) => {
+app.get('/disk', requireAuth, (req, res) => {
   const usage = getDiskUsage();
   const diskLimitMB = parseFloat(process.env.DISK_LIMIT_MB || '900'); // safe limit under 1GB
   const usedPercent = parseFloat(((usage.totalMB / diskLimitMB) * 100).toFixed(1));
@@ -609,7 +768,7 @@ app.get('/disk', (req, res) => {
 
 
 // POST /cleanup — manually trigger file cleanup
-app.post('/cleanup', (req, res) => {
+app.post('/cleanup', requireAuth, (req, res) => {
   console.log('🧹 Manual cleanup triggered via API');
   const result = cleanupOldFiles();
   res.json({
@@ -632,6 +791,106 @@ app.get('/health', (req, res) => {
       usedMB: usage.totalMB,
       fileCount: usage.fileCount,
     },
+  });
+});
+
+
+// GET /summary — single lightweight call for the dashboard UI.
+// Uses cached _totalMB values from the status log — never re-parses XLSX.
+app.get('/summary', requireAuth, (req, res) => {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  if (!folderPath || !fs.existsSync(folderPath)) {
+    return res.status(500).json({ success: false, error: 'EXCEL_FOLDER_PATH not configured' });
+  }
+
+  const uploaded  = loadUploadedLog();
+  const statusLog = loadStatusLog();
+  const disk      = getDiskUsage();
+
+  let files;
+  try {
+    files = fs.readdirSync(folderPath)
+      .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'))
+      .map(f => {
+        const isUploaded = uploaded.includes(f);
+        const status     = isUploaded ? 'DONE' : (statusLog[f] || 'PENDING');
+        const cachedMB   = statusLog[`${f}_totalMB`];
+        const totalDataGB = cachedMB != null
+          ? parseFloat((cachedMB / 1024).toFixed(4))
+          : null;
+
+        const entry = {
+          filename:    f,
+          status,
+          totalDataGB,
+          queuedAt:    statusLog[`${f}_queuedAt`]    || null,
+          startedAt:   statusLog[`${f}_startedAt`]   || null,
+          completedAt: statusLog[`${f}_completedAt`] || null,
+          failedAt:    statusLog[`${f}_failedAt`]    || null,
+          timedOutAt:  statusLog[`${f}_timedOutAt`]  || null,
+          retryCount:  statusLog[`${f}_retryCount`]  || 0,
+        };
+
+        if (statusLog[`${f}_orderIds`])     entry.orderIds = statusLog[`${f}_orderIds`];
+        else if (statusLog[`${f}_orderId`]) entry.orderId  = statusLog[`${f}_orderId`];
+
+        return entry;
+      });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+
+  const DONE_SET   = new Set(['DONE']);
+  const FAILED_SET = new Set(['FAILED', 'ABANDONED']);
+  const ACTIVE_SET = new Set(['IN_PROGRESS', 'PROCESSING', 'TIMEOUT']);
+  const diskLimitMB = parseFloat(process.env.DISK_LIMIT_MB || '900');
+
+  // Assign FFD queue positions — mirrors the largest-first sort in index.js
+  // PENDING files get positions 1, 2, 3… sorted by totalDataGB descending.
+  // IN_PROGRESS/PROCESSING get position 0 (currently active).
+  const QUEUEABLE = new Set(['PENDING', 'TIMEOUT']);
+  const pendingOrdered = files
+    .filter(f => QUEUEABLE.has(f.status))
+    .sort((a, b) => (b.totalDataGB || 0) - (a.totalDataGB || 0));
+  pendingOrdered.forEach((f, i) => { f.queuePosition = i + 1; });
+  files.filter(f => f.status === 'IN_PROGRESS' || f.status === 'PROCESSING')
+       .forEach(f => { f.queuePosition = 0; });
+
+  const queue = {
+    total:       files.length,
+    pending:     files.filter(f => !f.status || f.status === 'PENDING').length,
+    active:      files.filter(f => ACTIVE_SET.has(f.status)).length,
+    done:        files.filter(f => DONE_SET.has(f.status)).length,
+    failed:      files.filter(f => FAILED_SET.has(f.status)).length,
+    nextInLine:  pendingOrdered.length > 0 ? pendingOrdered[0].filename : null,
+    pendingMB: Math.round(
+      files
+        .filter(f => !DONE_SET.has(f.status) && !FAILED_SET.has(f.status))
+        .reduce((s, f) => s + (f.totalDataGB ? f.totalDataGB * 1024 : 0), 0)
+    ),
+  };
+
+  res.json({
+    success: true,
+    balance: {
+      text:      statusLog._lastBalance          || null,
+      mb:        statusLog._lastBalanceMB        || 0,
+      checkedAt: statusLog._lastBalanceCheckedAt || null,
+    },
+    purchase: {
+      status:      statusLog._purchaseStatus      || 'IDLE',
+      note:        statusLog._purchaseNote        || null,
+      requestedAt: statusLog._purchaseRequestedAt || null,
+      completedAt: statusLog._purchaseCompletedAt || null,
+    },
+    disk: {
+      usedMB:      disk.totalMB,
+      fileCount:   disk.fileCount,
+      limitMB:     diskLimitMB,
+      usedPercent: parseFloat(((disk.totalMB / diskLimitMB) * 100).toFixed(1)),
+    },
+    queue,
+    files,
   });
 });
 

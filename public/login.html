@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MTN GroupShare — Sign In</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0f172a;
+      --surface: #1e293b;
+      --border:  #334155;
+      --text:    #f1f5f9;
+      --muted:   #94a3b8;
+      --accent:  #ffcb00;
+      --green:   #22c55e;
+      --red:     #ef4444;
+      --r:       12px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent) 0%, rgba(255,203,0,0.2) 100%);
+      z-index: 10;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      width: 100%;
+      max-width: 380px;
+      padding: 36px 32px 32px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    .brand-pill {
+      background: var(--accent);
+      color: #000;
+      font-weight: 800;
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      padding: 3px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .brand-name {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .sub {
+      font-size: 0.82rem;
+      color: var(--muted);
+      margin-bottom: 28px;
+      line-height: 1.5;
+    }
+
+    label {
+      display: block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: var(--muted);
+      margin-bottom: 7px;
+    }
+
+    .inp {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 11px 14px;
+      color: var(--text);
+      font-size: 1.35rem;
+      letter-spacing: 0.25em;
+      text-align: center;
+      outline: none;
+      font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+      transition: border-color 0.15s;
+      margin-bottom: 18px;
+    }
+    .inp:focus { border-color: var(--accent); }
+    .inp::placeholder { letter-spacing: 0.05em; font-size: 0.9rem; color: var(--muted); }
+
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      font-size: 0.88rem;
+      font-weight: 600;
+      transition: opacity 0.15s, background 0.15s;
+    }
+    .btn:disabled { opacity: 0.45; cursor: default; }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #000;
+    }
+    .btn-primary:hover:not(:disabled) { opacity: 0.88; }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      margin-top: 10px;
+      font-weight: 500;
+    }
+    .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: #4a5c76; }
+
+    .msg {
+      display: none;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      margin-bottom: 16px;
+    }
+    .msg.error { display: block; background: rgba(239,68,68,0.1);  border: 1px solid rgba(239,68,68,0.35);  color: #fca5a5; }
+    .msg.ok    { display: block; background: rgba(34,197,94,0.1);  border: 1px solid rgba(34,197,94,0.35);  color: #86efac; }
+    .msg.info  { display: block; background: rgba(59,130,246,0.1); border: 1px solid rgba(59,130,246,0.35); color: #93c5fd; }
+
+    .divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 20px 0;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .divider::before, .divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .step { display: none; }
+    .step.active { display: block; }
+
+    .tg-hint {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      background: rgba(255,203,0,0.06);
+      border: 1px solid rgba(255,203,0,0.2);
+      border-radius: 8px;
+      padding: 11px 13px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.5;
+      margin-bottom: 20px;
+    }
+    .tg-hint span { font-size: 1.1rem; flex-shrink: 0; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid rgba(0,0,0,0.25);
+      border-top-color: #000;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    .spin.light {
+      border-color: var(--border);
+      border-top-color: var(--accent);
+    }
+
+    .counter {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">
+    <span class="brand-pill">MTN</span>
+    <span class="brand-name">GroupShare</span>
+  </div>
+
+  <!-- Step 1: Request OTP -->
+  <div class="step active" id="step1">
+    <h1>Sign in</h1>
+    <p class="sub">A one-time code will be sent to the configured Telegram account.</p>
+
+    <div class="tg-hint">
+      <span>📱</span>
+      <span>Tap the button below to receive your sign-in code via Telegram. The code expires after 5 minutes.</span>
+    </div>
+
+    <div class="msg" id="msg1"></div>
+
+    <button class="btn btn-primary" id="sendBtn" onclick="requestOtp()">
+      Send code to Telegram
+    </button>
+  </div>
+
+  <!-- Step 2: Enter OTP -->
+  <div class="step" id="step2">
+    <h1>Enter code</h1>
+    <p class="sub">Enter the 6-digit code sent to your Telegram.</p>
+
+    <div class="msg" id="msg2"></div>
+
+    <label for="otpInp">One-time code</label>
+    <input
+      class="inp"
+      id="otpInp"
+      type="text"
+      inputmode="numeric"
+      pattern="[0-9]*"
+      maxlength="6"
+      placeholder="⬡ ⬡ ⬡ ⬡ ⬡ ⬡"
+      autocomplete="one-time-code"
+      oninput="onOtpInput()"
+      onkeydown="onOtpKey(event)"
+    />
+
+    <button class="btn btn-primary" id="verifyBtn" onclick="verify()" disabled>
+      Sign in
+    </button>
+
+    <div class="divider">or</div>
+
+    <button class="btn btn-ghost" onclick="backToStep1()">
+      ← Request a new code
+    </button>
+
+    <div class="counter" id="counter"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+let countdownTimer = null;
+let secsLeft       = 0;
+
+function showMsg(id, type, text) {
+  const el = document.getElementById(id);
+  el.className = `msg ${type}`;
+  el.textContent = text;
+}
+
+function clearMsg(id) {
+  const el = document.getElementById(id);
+  el.className = 'msg';
+  el.textContent = '';
+}
+
+function setStep(n) {
+  document.getElementById('step1').classList.toggle('active', n === 1);
+  document.getElementById('step2').classList.toggle('active', n === 2);
+}
+
+/* ── Step 1: Request OTP ── */
+async function requestOtp() {
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> Sending…';
+  clearMsg('msg1');
+
+  try {
+    const r = await fetch('/auth/request-otp', { method: 'POST' });
+    const d = await r.json();
+
+    if (r.status === 429) {
+      const secs = d.retryAfterSeconds || 60;
+      showMsg('msg1', 'error', `Too many requests. Please wait ${secs} seconds before trying again.`);
+      btn.disabled = false;
+      btn.textContent = 'Send code to Telegram';
+      return;
+    }
+
+    if (!d.success) {
+      showMsg('msg1', 'error', d.error || 'Failed to send code. Please try again.');
+      btn.disabled = false;
+      btn.textContent = 'Send code to Telegram';
+      return;
+    }
+
+    // Success — move to OTP entry step
+    setStep(2);
+    document.getElementById('otpInp').value = '';
+    document.getElementById('verifyBtn').disabled = true;
+    clearMsg('msg2');
+    startCountdown(300); // 5-minute expiry
+
+  } catch (e) {
+    showMsg('msg1', 'error', 'Network error. Please check your connection.');
+    btn.disabled = false;
+    btn.textContent = 'Send code to Telegram';
+  }
+}
+
+function backToStep1() {
+  clearInterval(countdownTimer);
+  document.getElementById('counter').textContent = '';
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = false;
+  btn.textContent = 'Send code to Telegram';
+  clearMsg('msg1');
+  setStep(1);
+}
+
+/* ── Step 2: Verify OTP ── */
+function onOtpInput() {
+  const val = document.getElementById('otpInp').value.replace(/\D/g, '');
+  document.getElementById('otpInp').value = val;
+  document.getElementById('verifyBtn').disabled = val.length !== 6;
+}
+
+function onOtpKey(e) {
+  if (e.key === 'Enter' && document.getElementById('otpInp').value.replace(/\D/g, '').length === 6) {
+    verify();
+  }
+}
+
+async function verify() {
+  const otp  = document.getElementById('otpInp').value.replace(/\D/g, '');
+  const btn  = document.getElementById('verifyBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin"></span> Verifying…';
+  clearMsg('msg2');
+
+  try {
+    const r = await fetch('/auth/verify', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ otp }),
+    });
+    const d = await r.json();
+
+    if (d.success) {
+      clearInterval(countdownTimer);
+      showMsg('msg2', 'ok', '✓ Verified! Redirecting…');
+      setTimeout(() => { window.location.href = '/'; }, 600);
+      return;
+    }
+
+    showMsg('msg2', 'error', d.error || 'Verification failed. Please try again.');
+    btn.innerHTML = 'Sign in';
+    btn.disabled  = otp.length !== 6;
+
+  } catch (e) {
+    showMsg('msg2', 'error', 'Network error. Please check your connection.');
+    btn.innerHTML = 'Sign in';
+    btn.disabled  = false;
+  }
+}
+
+/* ── Expiry countdown ── */
+function startCountdown(secs) {
+  clearInterval(countdownTimer);
+  secsLeft = secs;
+  const el = document.getElementById('counter');
+
+  function tick() {
+    if (secsLeft <= 0) {
+      clearInterval(countdownTimer);
+      el.textContent = 'Code expired — request a new one.';
+      document.getElementById('verifyBtn').disabled = true;
+      showMsg('msg2', 'error', 'Code expired. Please request a new one.');
+      return;
+    }
+    const m = Math.floor(secsLeft / 60);
+    const s = secsLeft % 60;
+    el.textContent = `Code expires in ${m}:${String(s).padStart(2, '0')}`;
+    secsLeft--;
+  }
+
+  tick();
+  countdownTimer = setInterval(tick, 1000);
+}
+</script>
+</body>
+</html>
