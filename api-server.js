@@ -65,8 +65,31 @@ function parseCookies(req) {
   return result;
 }
 
+// Returns true when the request is authenticated via either:
+//   1. A valid browser session cookie  (OTP login — for the dashboard)
+//   2. The GROUPSHARE_CALLBACK_SECRET  (API key — for programmatic callers)
+//      Accepted as:  Authorization: Bearer <secret>
+//                    X-API-Key: <secret>
+//                    ?secret=<secret>  (query param, same as callback convention)
 function isAuthenticated(req) {
   if (!tgAuthBot || !tgAuthChatId) return true; // auth disabled — no bot configured
+
+  // ── Path 1: API key (programmatic callers) ──
+  const apiSecret = process.env.GROUPSHARE_CALLBACK_SECRET;
+  if (apiSecret) {
+    const bearerHeader = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
+    const xApiKey      = (req.headers['x-api-key'] || '').trim();
+    const querySecret  = (req.query.secret || '').trim();
+    const candidate    = bearerHeader || xApiKey || querySecret;
+    if (candidate) {
+      // Constant-time comparison to prevent timing attacks
+      const a = Buffer.from(candidate.padEnd(128, '\0'));
+      const b = Buffer.from(apiSecret.padEnd(128, '\0'));
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return true;
+    }
+  }
+
+  // ── Path 2: Browser session cookie (dashboard) ──
   const token  = parseCookies(req)['gs_session'];
   if (!token) return false;
   const expiry = _sessionStore.get(token);
@@ -78,7 +101,7 @@ function requireAuth(req, res, next) {
   if (isAuthenticated(req)) return next();
   const wantsJson = (req.headers.accept || '').includes('application/json')
                  || (req.headers['content-type'] || '').includes('json');
-  if (wantsJson) return res.status(401).json({ success: false, error: 'UNAUTHORIZED' });
+  if (wantsJson) return res.status(401).json({ success: false, error: 'UNAUTHORIZED', hint: 'Pass your API secret via Authorization: Bearer <secret>, X-API-Key header, or ?secret= query param' });
   res.redirect('/login');
 }
 
