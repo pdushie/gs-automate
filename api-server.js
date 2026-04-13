@@ -65,31 +65,9 @@ function parseCookies(req) {
   return result;
 }
 
-// Returns true when the request is authenticated via either:
-//   1. A valid browser session cookie  (OTP login — for the dashboard)
-//   2. The GROUPSHARE_CALLBACK_SECRET  (API key — for programmatic callers)
-//      Accepted as:  Authorization: Bearer <secret>
-//                    X-API-Key: <secret>
-//                    ?secret=<secret>  (query param, same as callback convention)
+// Returns true when the browser session cookie is valid (set after OTP login).
 function isAuthenticated(req) {
   if (!tgAuthBot || !tgAuthChatId) return true; // auth disabled — no bot configured
-
-  // ── Path 1: API key (programmatic callers) ──
-  const apiSecret = process.env.GROUPSHARE_CALLBACK_SECRET;
-  if (apiSecret) {
-    const bearerHeader = (req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
-    const xApiKey      = (req.headers['x-api-key'] || '').trim();
-    const querySecret  = (req.query.secret || '').trim();
-    const candidate    = bearerHeader || xApiKey || querySecret;
-    if (candidate) {
-      // Constant-time comparison to prevent timing attacks
-      const a = Buffer.from(candidate.padEnd(128, '\0'));
-      const b = Buffer.from(apiSecret.padEnd(128, '\0'));
-      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return true;
-    }
-  }
-
-  // ── Path 2: Browser session cookie (dashboard) ──
   const token  = parseCookies(req)['gs_session'];
   if (!token) return false;
   const expiry = _sessionStore.get(token);
@@ -97,11 +75,9 @@ function isAuthenticated(req) {
   return true;
 }
 
+// Only used to protect the dashboard HTML page — NOT API endpoints.
 function requireAuth(req, res, next) {
   if (isAuthenticated(req)) return next();
-  const wantsJson = (req.headers.accept || '').includes('application/json')
-                 || (req.headers['content-type'] || '').includes('json');
-  if (wantsJson) return res.status(401).json({ success: false, error: 'UNAUTHORIZED', hint: 'Pass your API secret via Authorization: Bearer <secret>, X-API-Key header, or ?secret= query param' });
   res.redirect('/login');
 }
 
@@ -592,7 +568,7 @@ function getExcelStats(filePath) {
 }
 
 // GET /status — get status of all files
-app.get('/status', requireAuth, (req, res) => {
+app.get('/status', (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
@@ -619,7 +595,7 @@ app.get('/status', requireAuth, (req, res) => {
 
 
 // GET /status/:filename — get status of a specific file
-app.get('/status/:filename', requireAuth, (req, res) => {
+app.get('/status/:filename', (req, res) => {
   const { filename } = req.params;
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
@@ -647,7 +623,7 @@ app.get('/status/:filename', requireAuth, (req, res) => {
 
 // GET /balance — return current balance from status log (refreshed each bot iteration).
 // Add ?refresh=true to force an immediate balance refresh (waits up to 25s for bot to respond).
-app.get('/balance', requireAuth, async (req, res) => {
+app.get('/balance', async (req, res) => {
   const wantRefresh = req.query.refresh === 'true';
 
   if (!wantRefresh) {
@@ -744,7 +720,7 @@ app.get('/balance', requireAuth, async (req, res) => {
 
 
 // POST /purchase — trigger a data bundle purchase on the bot
-app.post('/purchase', requireAuth, (req, res) => {
+app.post('/purchase', (req, res) => {
   withFileLock(STATUS_LOG, () => {
     const statusLog = loadStatusLog();
     saveStatusLog({ ...statusLog, _purchaseRequested: true, _purchaseStatus: 'PENDING', _purchaseRequestedAt: new Date().toISOString() });
@@ -754,7 +730,7 @@ app.post('/purchase', requireAuth, (req, res) => {
 });
 
 // GET /purchase-status — check the current state of a purchase request
-app.get('/purchase-status', requireAuth, (req, res) => {
+app.get('/purchase-status', (req, res) => {
   const log = loadStatusLog();
   return res.json({
     status: log._purchaseStatus || 'IDLE',
@@ -766,7 +742,7 @@ app.get('/purchase-status', requireAuth, (req, res) => {
 
 
 // GET /disk — get current disk usage of the upload folder
-app.get('/disk', requireAuth, (req, res) => {
+app.get('/disk', (req, res) => {
   const usage = getDiskUsage();
   const diskLimitMB = parseFloat(process.env.DISK_LIMIT_MB || '900'); // safe limit under 1GB
   const usedPercent = parseFloat(((usage.totalMB / diskLimitMB) * 100).toFixed(1));
@@ -791,7 +767,7 @@ app.get('/disk', requireAuth, (req, res) => {
 
 
 // POST /cleanup — manually trigger file cleanup
-app.post('/cleanup', requireAuth, (req, res) => {
+app.post('/cleanup', (req, res) => {
   console.log('🧹 Manual cleanup triggered via API');
   const result = cleanupOldFiles();
   res.json({

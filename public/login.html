@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MTN GroupShare — Sign In</title>
+  <title>EAI — Sign In</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -189,8 +189,11 @@
       color: var(--muted);
       line-height: 1.5;
       margin-bottom: 20px;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
     }
-    .tg-hint span { font-size: 1.1rem; flex-shrink: 0; }
+    .tg-hint .hint-text { min-width: 0; flex: 1; }
+    .tg-hint .hint-icon { font-size: 1.1rem; flex-shrink: 0; }
 
     @keyframes spin { to { transform: rotate(360deg); } }
     .spin {
@@ -218,8 +221,8 @@
 <body>
 <div class="card">
   <div class="brand">
-    <span class="brand-pill">MTN</span>
-    <span class="brand-name">GroupShare</span>
+    <span class="brand-pill">EAI</span>
+    <span class="brand-name">EAI</span>
   </div>
 
   <!-- Step 1: Request OTP -->
@@ -228,8 +231,8 @@
     <p class="sub">A one-time code will be sent to the configured Telegram account.</p>
 
     <div class="tg-hint">
-      <span>📱</span>
-      <span>Tap the button below to receive your sign-in code via Telegram. The code expires after 5 minutes.</span>
+      <span class="hint-icon">📱</span>
+      <span class="hint-text">Click the button below to receive a sign-in code via Telegram. Valid for 5 minutes.</span>
     </div>
 
     <div class="msg" id="msg1"></div>
