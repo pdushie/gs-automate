@@ -971,31 +971,49 @@ app.post('/airtime/callback', async (req, res) => {
   if (!stage) return res.status(400).json({ success: false, error: 'Missing stage' });
 
   if (stage === 'load_312') {
-    // load_312 complete — fire load_500
+    // Deduplication guard — skip if load_500 was already dispatched
+    const currentStage = loadStatusLog()._airtimeStage;
+    if (currentStage === 'load_500_sent' || currentStage === 'done') {
+      console.log(`⚡ Duplicate load_312 callback ignored (stage already: ${currentStage})`);
+      return res.json({ success: true, action: 'already_sent' });
+    }
+
+    // load_312 complete — acknowledge immediately, then wait 5s before firing load_500
+    console.log('📲 Airtime load_312 triggered via callback');
+    updateStatusLog({ _airtimeStage: 'load_312_sent', _airtimeLastCallbackAt: new Date().toISOString() });
+    res.json({ success: true, action: 'load_312_received' });
+
+    // Wait 5 seconds, then dispatch load_500
+    await new Promise(r => setTimeout(r, 5000));
+
     try {
       const r = await fetch('https://ntfy.sh/clickyfiedloader_5', {
         method: 'PUT',
         body: 'load_500',
       });
       if (r.ok) {
-        console.log('📲 Airtime load_500 triggered via callback');
-        updateStatusLog({ _airtimeStage: 'load_500_sent', _airtimeLastCallbackAt: new Date().toISOString() });
-        return res.json({ success: true, action: 'load_500_sent' });
+        console.log('📤 Airtime load_500 dispatched (5s after load_312 callback)');
+        updateStatusLog({ _airtimeStage: 'load_500_sent' });
       } else {
         const msg = `ntfy HTTP ${r.status}`;
         console.warn(`⚠️  Airtime load_500 ntfy.sh returned ${r.status}`);
-        updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg, _airtimeLastCallbackAt: new Date().toISOString() });
-        return res.status(502).json({ success: false, error: msg });
+        updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
       }
     } catch (err) {
-      console.error(`❌ Airtime load_500 trigger failed: ${err.message}`);
-      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message, _airtimeLastCallbackAt: new Date().toISOString() });
-      return res.status(500).json({ success: false, error: err.message });
+      console.error(`❌ Airtime load_500 dispatch failed: ${err.message}`);
+      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
     }
+    return;
   }
 
   if (stage === 'load_500') {
-    console.log('✅ Airtime load_500 confirmed done');
+    // Deduplication guard — skip if already marked done
+    if (loadStatusLog()._airtimeStage === 'done') {
+      console.log('⚡ Duplicate load_500 callback ignored (already done)');
+      return res.json({ success: true, action: 'already_done' });
+    }
+
+    console.log('📲 Airtime load_500 triggered via callback');
     updateStatusLog({ _airtimeStage: 'done', _airtimeLastCallbackAt: new Date().toISOString() });
     return res.json({ success: true, action: 'done' });
   }
