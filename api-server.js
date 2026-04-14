@@ -146,6 +146,13 @@ function saveStatusLog(statusLog) {
   atomicWrite(STATUS_LOG, JSON.stringify(statusLog, null, 2));
 }
 
+function updateStatusLog(updates) {
+  withFileLock(STATUS_LOG, () => {
+    const log = loadStatusLog();
+    saveStatusLog({ ...log, ...updates });
+  });
+}
+
 
 function getDiskUsage() {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
@@ -890,7 +897,110 @@ app.get('/summary', requireAuth, (req, res) => {
     },
     queue,
     files,
+    airtime: {
+      enabled:        statusLog._airtimeEnabled     || false,
+      windowStart:    statusLog._airtimeWindowStart ?? 0,
+      windowEnd:      statusLog._airtimeWindowEnd   ?? 24,
+      stage:          statusLog._airtimeStage       || 'idle',
+      triggeredAt:    statusLog._airtimeTriggeredAt || null,
+      lastCallbackAt: statusLog._airtimeLastCallbackAt || null,
+      lastError:      statusLog._airtimeLastError   || null,
+    },
   });
+});
+
+
+// ── AIRTIME LOADING ────────────────────────────────────────
+
+// GET /airtime/status — current airtime feature state (open endpoint)
+app.get('/airtime/status', (req, res) => {
+  const sl = loadStatusLog();
+  res.json({
+    success: true,
+    airtime: {
+      enabled:        sl._airtimeEnabled     || false,
+      windowStart:    sl._airtimeWindowStart ?? 0,
+      windowEnd:      sl._airtimeWindowEnd   ?? 24,
+      stage:          sl._airtimeStage       || 'idle',
+      triggeredAt:    sl._airtimeTriggeredAt || null,
+      lastCallbackAt: sl._airtimeLastCallbackAt || null,
+      lastError:      sl._airtimeLastError   || null,
+    },
+  });
+});
+
+// POST /airtime/settings — update airtime config (dashboard session required)
+app.post('/airtime/settings', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const { enabled, windowStart, windowEnd } = req.body || {};
+  const updates = {};
+  if (typeof enabled === 'boolean') updates._airtimeEnabled = enabled;
+  if (typeof windowStart === 'number' && windowStart >= 0 && windowStart <= 23) updates._airtimeWindowStart = Math.floor(windowStart);
+  if (typeof windowEnd   === 'number' && windowEnd   >= 1 && windowEnd   <= 24) updates._airtimeWindowEnd   = Math.floor(windowEnd);
+
+  updateStatusLog(updates);
+  const sl = loadStatusLog();
+  return res.json({
+    success: true,
+    airtime: {
+      enabled:     sl._airtimeEnabled     || false,
+      windowStart: sl._airtimeWindowStart ?? 0,
+      windowEnd:   sl._airtimeWindowEnd   ?? 24,
+    },
+  });
+});
+
+// POST /airtime/callback — USSD process signals a stage has completed.
+// Secured with x-airtime-secret header (or ?secret= query param) matching GROUPSHARE_CALLBACK_SECRET.
+// Body: { "stage": "load_312" } or { "stage": "load_500" }
+app.post('/airtime/callback', async (req, res) => {
+  const expected = process.env.GROUPSHARE_CALLBACK_SECRET;
+  if (expected) {
+    const given = String(req.headers['x-airtime-secret'] || req.query.secret || '');
+    // Constant-time comparison; pad to same length to avoid length oracle
+    const expBuf   = Buffer.from(expected, 'utf8');
+    const givenBuf = Buffer.alloc(expBuf.length, 0);
+    Buffer.from(given, 'utf8').copy(givenBuf);
+    if (!crypto.timingSafeEqual(expBuf, givenBuf)) {
+      return res.status(401).json({ success: false, error: 'Unauthorized' });
+    }
+  }
+
+  const { stage } = req.body || {};
+  if (!stage) return res.status(400).json({ success: false, error: 'Missing stage' });
+
+  if (stage === 'load_312') {
+    // load_312 complete — fire load_500
+    try {
+      const r = await fetch('https://ntfy.sh/clickyfiedloader_5', {
+        method: 'PUT',
+        body: 'load_500',
+      });
+      if (r.ok) {
+        console.log('📲 Airtime load_500 triggered via callback');
+        updateStatusLog({ _airtimeStage: 'load_500_sent', _airtimeLastCallbackAt: new Date().toISOString() });
+        return res.json({ success: true, action: 'load_500_sent' });
+      } else {
+        const msg = `ntfy HTTP ${r.status}`;
+        console.warn(`⚠️  Airtime load_500 ntfy.sh returned ${r.status}`);
+        updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg, _airtimeLastCallbackAt: new Date().toISOString() });
+        return res.status(502).json({ success: false, error: msg });
+      }
+    } catch (err) {
+      console.error(`❌ Airtime load_500 trigger failed: ${err.message}`);
+      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message, _airtimeLastCallbackAt: new Date().toISOString() });
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  if (stage === 'load_500') {
+    console.log('✅ Airtime load_500 confirmed done');
+    updateStatusLog({ _airtimeStage: 'done', _airtimeLastCallbackAt: new Date().toISOString() });
+    return res.json({ success: true, action: 'done' });
+  }
+
+  return res.status(400).json({ success: false, error: `Unknown stage: ${stage}` });
 });
 
 

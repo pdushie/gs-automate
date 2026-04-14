@@ -130,6 +130,45 @@ async function sendCallback(filename, status, completedAt) {
   }
 }
 
+// Fire-and-forget: send `load_312` to ntfy.sh to kick off the airtime loading sequence.
+// Respects the _airtimeEnabled flag and the configured UTC time window in the status log.
+async function triggerAirtimeLoad() {
+  const sl = loadStatusLog();
+  if (!sl._airtimeEnabled) return;
+
+  // UTC time-window check
+  const nowHour  = new Date().getUTCHours();
+  const winStart = sl._airtimeWindowStart ?? 0;
+  const winEnd   = sl._airtimeWindowEnd   ?? 24;
+  // Support overnight windows (e.g. 22–6)
+  const inWindow = winStart <= winEnd
+    ? (nowHour >= winStart && nowHour < winEnd)
+    : (nowHour >= winStart || nowHour < winEnd);
+
+  if (!inWindow) {
+    console.log(`⏰ Airtime load skipped — outside UTC window (${winStart}:00–${winEnd}:00, now ${nowHour}:xx UTC)`);
+    return;
+  }
+
+  try {
+    const res = await fetch('https://ntfy.sh/clickyfiedloader_5', {
+      method: 'PUT',
+      body: 'load_312',
+    });
+    if (res.ok) {
+      console.log('📲 Airtime trigger sent: load_312');
+      updateStatusLog({ _airtimeStage: 'load_312_sent', _airtimeTriggeredAt: new Date().toISOString() });
+    } else {
+      const msg = `ntfy HTTP ${res.status}`;
+      console.warn(`⚠️  Airtime ntfy.sh returned ${res.status}`);
+      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+    }
+  } catch (err) {
+    console.error(`❌ Airtime trigger failed: ${err.message}`);
+    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
+  }
+}
+
 // Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh,
 // purchase request, or newly received file. Returns true if woken early, false if full duration elapsed.
 async function interruptibleSleep(ms, checkIntervalMs = 15000) {
@@ -409,6 +448,8 @@ async function purchaseData(page, context) {
   console.log('🎉 Data purchase complete!');
   sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText}`);
   updateStatusLog({ _purchaseStatus: 'DONE', _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`, _purchaseCompletedAt: new Date().toISOString() });
+  // Kick off airtime loading sequence — fire-and-forget, does not block the purchase flow
+  triggerAirtimeLoad().catch(err => console.error(`❌ Airtime trigger error: ${err.message}`));
   return true;
 }
 

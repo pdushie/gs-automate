@@ -443,6 +443,95 @@
       color: var(--muted);
       flex-shrink: 0;
     }
+
+    /* ── Airtime panel ── */
+    .airtime-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      padding: 16px 18px;
+      margin-bottom: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px;
+    }
+    .airtime-panel-title {
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      flex-shrink: 0;
+      margin-right: 4px;
+    }
+    /* toggle switch */
+    .toggle-wrap { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .toggle-label { font-size: 0.82rem; }
+    .toggle {
+      position: relative;
+      width: 40px; height: 22px;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; inset: 0;
+      background: var(--border);
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 16px; height: 16px;
+      left: 3px; top: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .toggle-slider { background: var(--accent); }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
+
+    /* time window inputs */
+    .airtime-window {
+      display: flex; align-items: center; gap: 7px; flex-shrink: 0;
+      font-size: 0.82rem; color: var(--muted);
+    }
+    .airtime-window label { color: var(--muted); font-size: 0.78rem; }
+    .hour-inp {
+      width: 56px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 8px;
+      color: var(--text);
+      font-size: 0.82rem;
+      outline: none;
+      transition: border-color 0.15s;
+      text-align: center;
+    }
+    .hour-inp:focus { border-color: var(--accent); }
+
+    /* stage chip */
+    .airtime-stage {
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 3px 10px;
+      border-radius: 20px;
+      flex-shrink: 0;
+      background: rgba(148,163,184,0.1);
+      color: var(--muted);
+    }
+    .airtime-stage.s-load_312_sent { background: rgba(59,130,246,0.14); color: #93c5fd; }
+    .airtime-stage.s-load_500_sent { background: rgba(249,115,22,0.14);  color: #fdba74; }
+    .airtime-stage.s-done          { background: rgba(34,197,94,0.14);   color: #86efac; }
+    .airtime-stage.s-error         { background: rgba(239,68,68,0.14);   color: #fca5a5; }
+    .airtime-stage.s-disabled      { background: rgba(148,163,184,0.06); color: #475569; }
+
+    .btn.btn-save { border-color: var(--accent); color: var(--accent); }
+    .btn.btn-save:hover { background: rgba(255,203,0,0.08); }
   </style>
 </head>
 <body>
@@ -505,6 +594,30 @@
     <span class="next-strip-label">▶ Next in line</span>
     <span class="next-strip-name" id="nextName">—</span>
     <span class="next-strip-size" id="nextSize"></span>
+  </div>
+
+  <!-- Airtime loader control panel -->
+  <div class="airtime-panel" id="airtimePanel">
+    <span class="airtime-panel-title">Airtime Loader</span>
+
+    <div class="toggle-wrap">
+      <label class="toggle" title="Enable / disable airtime loading after bundle purchase">
+        <input type="checkbox" id="airtimeToggle" onchange="saveAirtimeSettings()" />
+        <span class="toggle-slider"></span>
+      </label>
+      <span class="toggle-label" id="airtimeToggleLabel">Disabled</span>
+    </div>
+
+    <div class="airtime-window">
+      <label for="airtimeStart">UTC window</label>
+      <input class="hour-inp" id="airtimeStart" type="number" min="0" max="23" step="1" value="0" title="Start hour (UTC, 0–23)" />
+      <span>–</span>
+      <input class="hour-inp" id="airtimeEnd"   type="number" min="1" max="24" step="1" value="24" title="End hour (UTC, 1–24; 24 = midnight)" />
+      <span>UTC</span>
+      <button class="btn btn-save" id="airtimeSaveBtn" onclick="saveAirtimeSettings()">Save</button>
+    </div>
+
+    <span class="airtime-stage s-disabled" id="airtimeStage">idle</span>
   </div>
 
   <!-- Search -->
@@ -889,6 +1002,7 @@ async function doRefresh() {
     if (d.files) allFiles = d.files;
     renderStats(d);
     applyView();
+    if (d.airtime) applyAirtimeState(d.airtime);
 
     const t = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
     document.getElementById('ts').textContent = `Updated ${t}`;
@@ -914,6 +1028,67 @@ function startCountdown() {
   }, 1000);
 }
 
+/* ── Airtime ────────────────────────────── */
+async function loadAirtimeStatus() {
+  try {
+    const r = await fetch('/airtime/status');
+    if (!r.ok) return;
+    const { airtime } = await r.json();
+    applyAirtimeState(airtime);
+  } catch {}
+}
+
+function applyAirtimeState(a) {
+  if (!a) return;
+  const toggle = document.getElementById('airtimeToggle');
+  const label  = document.getElementById('airtimeToggleLabel');
+  const stage  = document.getElementById('airtimeStage');
+  const start  = document.getElementById('airtimeStart');
+  const end    = document.getElementById('airtimeEnd');
+
+  toggle.checked  = !!a.enabled;
+  label.textContent = a.enabled ? 'Enabled' : 'Disabled';
+  start.value = a.windowStart ?? 0;
+  end.value   = a.windowEnd   ?? 24;
+
+  const s = a.enabled ? (a.stage || 'idle') : 'disabled';
+  stage.textContent = s.replace(/_/g, ' ');
+  stage.className   = `airtime-stage s-${s}`;
+}
+
+async function saveAirtimeSettings() {
+  const btn     = document.getElementById('airtimeSaveBtn');
+  const enabled = document.getElementById('airtimeToggle').checked;
+  const label   = document.getElementById('airtimeToggleLabel');
+  const wStart  = parseInt(document.getElementById('airtimeStart').value, 10);
+  const wEnd    = parseInt(document.getElementById('airtimeEnd').value,   10);
+
+  label.textContent = enabled ? 'Enabled' : 'Disabled';
+  btn.disabled = true;
+  btn.textContent = '…';
+
+  try {
+    const r = await fetch('/airtime/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled, windowStart: wStart, windowEnd: wEnd }),
+    });
+    const d = await r.json();
+    if (d.success) {
+      applyAirtimeState({ ...d.airtime, stage: null });
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = 'Save'; }, 1500);
+    } else {
+      btn.textContent = 'Error';
+      setTimeout(() => { btn.textContent = 'Save'; }, 2000);
+    }
+  } catch {
+    btn.textContent = 'Error';
+    setTimeout(() => { btn.textContent = 'Save'; }, 2000);
+  }
+  btn.disabled = false;
+}
+
 /* ── Auth ────────────────────────────────── */
 function logout() {
   fetch('/auth/logout', { method: 'POST' })
@@ -931,6 +1106,7 @@ function checkSession() {
 
 /* ── Boot ────────────────────────────────── */
 doRefresh().then(startCountdown);
+loadAirtimeStatus();
 setInterval(checkSession, 5 * 60 * 1000);
 </script>
 </body>
