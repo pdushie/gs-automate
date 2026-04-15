@@ -987,7 +987,8 @@ app.post('/airtime/callback', async (req, res) => {
     await new Promise(r => setTimeout(r, 5000));
 
     try {
-      const r = await fetch('https://ntfy.sh/clickyfiedloader_5', {
+      const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
+      const r = await fetch(ntfyUrl, {
         method: 'PUT',
         body: 'load_500',
       });
