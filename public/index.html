@@ -113,13 +113,14 @@
     /* ── Stats ── */
     .stats {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat(6, 1fr);
       gap: 14px;
       margin-bottom: 18px;
     }
 
-    @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-    @media (max-width: 480px) { .stats { grid-template-columns: 1fr; } }
+    @media (max-width: 1200px) { .stats { grid-template-columns: repeat(3, 1fr); } }
+    @media (max-width: 700px)  { .stats { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px)  { .stats { grid-template-columns: 1fr; } }
 
     .card {
       background: var(--surface);
@@ -499,8 +500,8 @@
       font-size: 0.82rem; color: var(--muted);
     }
     .airtime-window label { color: var(--muted); font-size: 0.78rem; }
-    .hour-inp {
-      width: 56px;
+    .time-inp {
+      width: 80px;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -510,8 +511,9 @@
       outline: none;
       transition: border-color 0.15s;
       text-align: center;
+      color-scheme: dark;
     }
-    .hour-inp:focus { border-color: var(--accent); }
+    .time-inp:focus { border-color: var(--accent); }
 
     /* stage chip */
     .airtime-stage {
@@ -563,6 +565,12 @@
     </div>
 
     <div class="card">
+      <div class="card-lbl">Portal Balance</div>
+      <div class="card-val" id="acctVal">—</div>
+      <div class="card-sub" id="acctSub">GH¢ account balance</div>
+    </div>
+
+    <div class="card">
       <div class="card-lbl">Queue</div>
       <div class="card-val" id="queueVal">—</div>
       <div class="card-sub" id="queueSub">Loading…</div>
@@ -572,6 +580,12 @@
       <div class="card-lbl">Processed</div>
       <div class="card-val" id="doneVal">—</div>
       <div class="card-sub" id="doneSub">Loading…</div>
+    </div>
+
+    <div class="card">
+      <div class="card-lbl">Airtime Loaded</div>
+      <div class="card-val" id="airtimeVal">—</div>
+      <div class="card-sub" id="airtimeSub">Loader disabled</div>
     </div>
 
     <div class="card">
@@ -610,9 +624,9 @@
 
     <div class="airtime-window">
       <label for="airtimeStart">UTC window</label>
-      <input class="hour-inp" id="airtimeStart" type="number" min="0" max="23" step="1" value="0" title="Start hour (UTC, 0–23)" />
+      <input class="time-inp" id="airtimeStart" type="time" value="00:00" title="Start time (UTC)" />
       <span>–</span>
-      <input class="hour-inp" id="airtimeEnd"   type="number" min="1" max="24" step="1" value="24" title="End hour (UTC, 1–24; 24 = midnight)" />
+      <input class="time-inp" id="airtimeEnd"   type="time" value="23:59" title="End time (UTC)" />
       <span>UTC</span>
       <button class="btn btn-save" id="airtimeSaveBtn" onclick="saveAirtimeSettings()">Save</button>
     </div>
@@ -776,6 +790,21 @@ function renderStats(d) {
       ageMins < 1 ? 'Updated just now' : `Updated ${ageMins} min ago`;
   } else {
     document.getElementById('balSub').textContent = 'No balance reading yet';
+  }
+
+  // Portal (account GHC) balance
+  const acctVal = document.getElementById('acctVal');
+  const acctSub = document.getElementById('acctSub');
+  if (balance.accountGhc != null) {
+    acctVal.textContent = `GH\u00a2\u00a0${balance.accountGhc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    acctVal.style.color = balance.accountGhc < 4813 ? 'var(--orange)' : 'var(--text)';
+    acctSub.textContent = 'GH\u00a2 account balance';
+  } else if (balance.accountText) {
+    acctVal.textContent = balance.accountText;
+    acctSub.textContent = 'GH\u00a2 account balance';
+  } else {
+    acctVal.textContent = '\u2014';
+    acctSub.textContent = 'Not yet read';
   }
 
   // Queue
@@ -1046,22 +1075,52 @@ function applyAirtimeState(a) {
   const start  = document.getElementById('airtimeStart');
   const end    = document.getElementById('airtimeEnd');
 
-  toggle.checked  = !!a.enabled;
+  toggle.checked    = !!a.enabled;
   label.textContent = a.enabled ? 'Enabled' : 'Disabled';
-  start.value = a.windowStart ?? 0;
-  end.value   = a.windowEnd   ?? 24;
+  const _normWin   = v => (v == null ? null : v <= 24 ? v * 60 : v);
+  const _minsToTime = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  start.value = _minsToTime(_normWin(a.windowStart) ?? 0);
+  end.value   = _minsToTime(Math.min(_normWin(a.windowEnd) ?? 1439, 1439));
 
   const s = a.enabled ? (a.stage || 'idle') : 'disabled';
   stage.textContent = s.replace(/_/g, ' ');
   stage.className   = `airtime-stage s-${s}`;
+
+  // ── Airtime Loaded tile ──
+  const airtimeVal = document.getElementById('airtimeVal');
+  const airtimeSub = document.getElementById('airtimeSub');
+  if (!airtimeVal) return;
+
+  const load312    = a.load312Verified ? 312 : 0;
+  const load500    = a.load500TotalAdded ?? 0;
+  const totalAdded = load312 + load500;
+  const rounds     = a.load500Count     ?? 0;
+  const maxRounds  = a.load500MaxRounds ?? 9;
+  const target     = a.load500TargetGhc ?? 4500;
+  const isDone     = a.stage === 'done';
+  const isActive   = ['load_312_sent','load_312_verified','load_500_sent','load_500_processing'].includes(a.stage);
+
+  airtimeVal.textContent = totalAdded > 0 ? `GH\u00a2 ${totalAdded.toLocaleString()}` : '\u2014';
+  airtimeVal.style.color = isDone ? 'var(--green)' : isActive ? 'var(--accent)' : 'var(--text)';
+
+  if (isDone) {
+    airtimeSub.textContent = `Complete \u2014 GH\u00a2 ${totalAdded.toLocaleString()} added`;
+  } else if (totalAdded > 0) {
+    airtimeSub.textContent = `${rounds} of ${maxRounds} rounds \u00b7 GH\u00a2 ${load500.toLocaleString()} / ${target.toLocaleString()}`;
+  } else if (a.stage === 'load_312_sent') {
+    airtimeSub.textContent = 'Waiting for load_312 callback\u2026';
+  } else {
+    airtimeSub.textContent = a.enabled ? 'Idle' : 'Loader disabled';
+  }
 }
 
 async function saveAirtimeSettings() {
   const btn     = document.getElementById('airtimeSaveBtn');
   const enabled = document.getElementById('airtimeToggle').checked;
   const label   = document.getElementById('airtimeToggleLabel');
-  const wStart  = parseInt(document.getElementById('airtimeStart').value, 10);
-  const wEnd    = parseInt(document.getElementById('airtimeEnd').value,   10);
+  const _timeToMins = t => { const [h, m] = (t || '00:00').split(':').map(Number); return h * 60 + (m || 0); };
+  const wStart  = _timeToMins(document.getElementById('airtimeStart').value);
+  const wEnd    = _timeToMins(document.getElementById('airtimeEnd').value) || 1440;
 
   label.textContent = enabled ? 'Enabled' : 'Disabled';
   btn.disabled = true;

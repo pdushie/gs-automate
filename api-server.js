@@ -26,8 +26,10 @@ const QUEUE_THRESHOLD_MB = QUEUE_CAPACITY_MB - (10 * 1024);  // 1.49 TB — reje
 // ── AUTH ─────────────────────────────────────────────────
 // Dashboard access is protected by a Telegram-delivered OTP.
 // If TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set, auth is bypassed (dev mode).
-const tgAuthBot    = process.env.TELEGRAM_BOT_TOKEN ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: false }) : null;
-const tgAuthChatId = process.env.TELEGRAM_CHAT_ID   || null;
+const tgAuthBot    = process.env.TELEGRAM_BOT_TOKEN   ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN,   { polling: false }) : null;
+const tgAuthChatId = process.env.TELEGRAM_CHAT_ID     || null;
+const tgAuthBot2   = process.env.TELEGRAM_BOT_TOKEN_2 ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_2, { polling: false }) : null;
+const tgAuthChatId2 = process.env.TELEGRAM_CHAT_ID_2  || null;
 
 // In-memory stores — reset on process restart (forces re-login, no db dependency)
 const _otpStore     = new Map(); // 'global' -> { code, expiresAt, used }
@@ -393,7 +395,20 @@ app.post('/auth/request-otp', (req, res) => {
   _otpStore.set('global', { code, expiresAt, used: false });
 
   const text = `🔐 *MTN GroupShare Dashboard*\n\nYour sign-in code:\n\`${code}\`\n\n_Valid for 5 minutes. Do not share this code._`;
-  tgAuthBot.sendMessage(tgAuthChatId, text, { parse_mode: 'Markdown' })
+
+  // Send to all configured Telegram recipients
+  const tgRecipients = [
+    { bot: tgAuthBot,  chatId: tgAuthChatId },
+    { bot: tgAuthBot2, chatId: tgAuthChatId2 },
+  ].filter(r => r.bot && r.chatId);
+
+  if (tgRecipients.length === 0) {
+    console.error('❌ OTP Telegram send failed: no bots configured');
+    _otpStore.delete('global');
+    return res.status(500).json({ success: false, error: 'Failed to deliver OTP. Check bot configuration.' });
+  }
+
+  Promise.all(tgRecipients.map(r => r.bot.sendMessage(r.chatId, text, { parse_mode: 'Markdown' })))
     .then(() => {
       console.log(`🔑 OTP sent via Telegram (ip: ${ip})`);
       res.json({ success: true });
@@ -596,6 +611,22 @@ app.get('/status', (req, res) => {
       else if (statusLog[f + '_orderId']) entry.orderId = statusLog[f + '_orderId'];
       return entry;
     });
+
+  // Sort: most recently completed/failed first, pending/active at the bottom
+  const DONE_STATES = new Set(['DONE', 'FAILED', 'ABANDONED']);
+  allFiles.sort((a, b) => {
+    const aDone = DONE_STATES.has(a.status);
+    const bDone = DONE_STATES.has(b.status);
+    if (aDone && bDone) {
+      // Both finished — most recently completed first
+      const aTime = a.completedAt || 0;
+      const bTime = b.completedAt || 0;
+      return bTime > aTime ? 1 : bTime < aTime ? -1 : 0;
+    }
+    if (aDone) return -1; // finished before not-finished
+    if (bDone) return  1;
+    return 0; // preserve original order for pending/active
+  });
 
   res.json({ success: true, files: allFiles });
 });
@@ -862,6 +893,27 @@ app.get('/summary', requireAuth, (req, res) => {
   files.filter(f => f.status === 'IN_PROGRESS' || f.status === 'PROCESSING')
        .forEach(f => { f.queuePosition = 0; });
 
+  // Sort: most recently completed/failed first, then active (queuePosition 0), then pending by queue order
+  files.sort((a, b) => {
+    const FINISHED = new Set(['DONE', 'FAILED', 'ABANDONED']);
+    const aFinished = FINISHED.has(a.status);
+    const bFinished = FINISHED.has(b.status);
+
+    // Finished files: sort by completedAt/failedAt descending (most recent first)
+    if (aFinished && bFinished) {
+      const aTime = a.completedAt || a.failedAt || 0;
+      const bTime = b.completedAt || b.failedAt || 0;
+      return bTime > aTime ? 1 : bTime < aTime ? -1 : 0;
+    }
+    if (aFinished) return -1;
+    if (bFinished) return  1;
+
+    // Non-finished: sort by queuePosition ascending (0 = active, then 1, 2, 3…)
+    const aPos = a.queuePosition ?? Infinity;
+    const bPos = b.queuePosition ?? Infinity;
+    return aPos - bPos;
+  });
+
   const queue = {
     total:       files.length,
     pending:     files.filter(f => !f.status || f.status === 'PENDING').length,
@@ -879,9 +931,11 @@ app.get('/summary', requireAuth, (req, res) => {
   res.json({
     success: true,
     balance: {
-      text:      statusLog._lastBalance          || null,
-      mb:        statusLog._lastBalanceMB        || 0,
-      checkedAt: statusLog._lastBalanceCheckedAt || null,
+      text:         statusLog._lastBalance             || null,
+      mb:           statusLog._lastBalanceMB           || 0,
+      checkedAt:    statusLog._lastBalanceCheckedAt    || null,
+      accountGhc:   statusLog._lastAccountBalance      ?? null,
+      accountText:  statusLog._lastAccountBalanceText  || null,
     },
     purchase: {
       status:      statusLog._purchaseStatus      || 'IDLE',
@@ -898,13 +952,18 @@ app.get('/summary', requireAuth, (req, res) => {
     queue,
     files,
     airtime: {
-      enabled:        statusLog._airtimeEnabled     || false,
-      windowStart:    statusLog._airtimeWindowStart ?? 0,
-      windowEnd:      statusLog._airtimeWindowEnd   ?? 24,
-      stage:          statusLog._airtimeStage       || 'idle',
-      triggeredAt:    statusLog._airtimeTriggeredAt || null,
-      lastCallbackAt: statusLog._airtimeLastCallbackAt || null,
-      lastError:      statusLog._airtimeLastError   || null,
+      enabled:            statusLog._airtimeEnabled           || false,
+      windowStart:        statusLog._airtimeWindowStart       ?? 0,
+      windowEnd:          statusLog._airtimeWindowEnd         ?? 24,
+      stage:              statusLog._airtimeStage             || 'idle',
+      triggeredAt:        statusLog._airtimeTriggeredAt       || null,
+      lastCallbackAt:     statusLog._airtimeLastCallbackAt    || null,
+      lastError:          statusLog._airtimeLastError         || null,
+      load312Verified:    statusLog._airtimeLoad312Verified   ?? null,
+      load500Count:       statusLog._airtimeLoad500Count      ?? 0,
+      load500TotalAdded:  statusLog._airtimeLoad500TotalAdded ?? 0,
+      load500MaxRounds:   AIRTIME_LOAD500_MAX_ROUNDS,
+      load500TargetGhc:   AIRTIME_LOAD500_TARGET_GHC,
     },
   });
 });
@@ -912,19 +971,104 @@ app.get('/summary', requireAuth, (req, res) => {
 
 // ── AIRTIME LOADING ────────────────────────────────────────
 
+const AIRTIME_LOAD500_MAX_ROUNDS = 9;
+const AIRTIME_LOAD500_TARGET_GHC = 4500;
+const AIRTIME_BALANCE_TOLERANCE  = 50; // GHC — acceptable shortfall when verifying balance increase
+const AIRTIME_MAX_RETRIES        = 2;  // max retry attempts per stage before proceeding anyway
+
+// Request a fresh balance from the bot and wait up to timeoutMs for it.
+// Returns the updated status log, or the current one if the bot doesn't respond in time.
+async function waitForFreshAccountBalance(timeoutMs = 20000) {
+  const requestedAt = Date.now();
+  withFileLock(STATUS_LOG, () => {
+    const sl = loadStatusLog();
+    saveStatusLog({ ...sl, _balanceRefreshRequested: true });
+  });
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 1500));
+    const sl = loadStatusLog();
+    const checkedAt = sl._lastBalanceCheckedAt;
+    if (!sl._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
+      console.log('✅ Portal balance refreshed for USSD verification');
+      return sl;
+    }
+  }
+  // Timed out — clear the stale flag and return what we have
+  withFileLock(STATUS_LOG, () => {
+    const s = loadStatusLog();
+    if (s._balanceRefreshRequested) saveStatusLog({ ...s, _balanceRefreshRequested: false });
+  });
+  console.warn('⚠️  Portal balance refresh timed out — using last known value');
+  return loadStatusLog();
+}
+
+// Retry load_312 via ntfy (used when USSD failure is confirmed by portal).
+async function dispatchLoad312Ntfy() {
+  try {
+    const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
+    const r = await fetch(ntfyUrl, { method: 'PUT', body: 'load_312' });
+    if (r.ok) {
+      console.log('📤 Airtime load_312 retried via ntfy');
+      updateStatusLog({ _airtimeStage: 'load_312_sent' });
+    } else {
+      const msg = `ntfy HTTP ${r.status}`;
+      console.warn(`⚠️  load_312 retry ntfy returned ${r.status}`);
+      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+    }
+  } catch (err) {
+    console.error(`❌ load_312 retry failed: ${err.message}`);
+    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
+  }
+}
+
+// Send load_500 to ntfy and record the sent round number in the status log.
+// Snapshots the current portal account balance before dispatching so the credit
+// verifier can compare before/after to confirm the phone's transfer arrived.
+async function dispatchLoad500Ntfy(roundNumber) {
+  const slNow = loadStatusLog();
+  try {
+    const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
+    const r = await fetch(ntfyUrl, { method: 'PUT', body: 'load_500' });
+    if (r.ok) {
+      console.log(`📤 Airtime load_500 round ${roundNumber}/${AIRTIME_LOAD500_MAX_ROUNDS} dispatched`);
+      updateStatusLog({
+        _airtimeStage: 'load_500_sent',
+        _airtimeLoad500SentCount: roundNumber,
+        // NOTE: _airtimeLoad500RetryCount is intentionally NOT reset here —
+        // the caller owns the retry counter (fresh starts reset it explicitly).
+        _airtimeAcctBalBeforeLoad500: slNow._lastAccountBalance ?? null,
+      });
+    } else {
+      const msg = `ntfy HTTP ${r.status}`;
+      console.warn(`⚠️  Airtime load_500 round ${roundNumber} ntfy returned ${r.status}`);
+      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+    }
+  } catch (err) {
+    console.error(`❌ Airtime load_500 round ${roundNumber} dispatch failed: ${err.message}`);
+    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
+  }
+}
+
 // GET /airtime/status — current airtime feature state (open endpoint)
 app.get('/airtime/status', (req, res) => {
   const sl = loadStatusLog();
   res.json({
     success: true,
     airtime: {
-      enabled:        sl._airtimeEnabled     || false,
-      windowStart:    sl._airtimeWindowStart ?? 0,
-      windowEnd:      sl._airtimeWindowEnd   ?? 24,
-      stage:          sl._airtimeStage       || 'idle',
-      triggeredAt:    sl._airtimeTriggeredAt || null,
-      lastCallbackAt: sl._airtimeLastCallbackAt || null,
-      lastError:      sl._airtimeLastError   || null,
+      enabled:            sl._airtimeEnabled           || false,
+      windowStart:        sl._airtimeWindowStart       ?? 0,
+      windowEnd:          sl._airtimeWindowEnd         ?? 1440,
+      stage:              sl._airtimeStage             || 'idle',
+      triggeredAt:        sl._airtimeTriggeredAt       || null,
+      lastCallbackAt:     sl._airtimeLastCallbackAt    || null,
+      lastError:          sl._airtimeLastError         || null,
+      load312Verified:    sl._airtimeLoad312Verified   ?? null,
+      load500Count:       sl._airtimeLoad500Count      ?? 0,
+      load500TotalAdded:  sl._airtimeLoad500TotalAdded ?? 0,
+      load500MaxRounds:   AIRTIME_LOAD500_MAX_ROUNDS,
+      load500TargetGhc:   AIRTIME_LOAD500_TARGET_GHC,
     },
   });
 });
@@ -936,8 +1080,8 @@ app.post('/airtime/settings', (req, res) => {
   const { enabled, windowStart, windowEnd } = req.body || {};
   const updates = {};
   if (typeof enabled === 'boolean') updates._airtimeEnabled = enabled;
-  if (typeof windowStart === 'number' && windowStart >= 0 && windowStart <= 23) updates._airtimeWindowStart = Math.floor(windowStart);
-  if (typeof windowEnd   === 'number' && windowEnd   >= 1 && windowEnd   <= 24) updates._airtimeWindowEnd   = Math.floor(windowEnd);
+  if (typeof windowStart === 'number' && windowStart >= 0 && windowStart <= 1439) updates._airtimeWindowStart = Math.floor(windowStart);
+  if (typeof windowEnd   === 'number' && windowEnd   >= 1 && windowEnd   <= 1440) updates._airtimeWindowEnd   = Math.floor(windowEnd);
 
   updateStatusLog(updates);
   const sl = loadStatusLog();
@@ -946,19 +1090,21 @@ app.post('/airtime/settings', (req, res) => {
     airtime: {
       enabled:     sl._airtimeEnabled     || false,
       windowStart: sl._airtimeWindowStart ?? 0,
-      windowEnd:   sl._airtimeWindowEnd   ?? 24,
+      windowEnd:   sl._airtimeWindowEnd   ?? 1440,
     },
   });
 });
 
 // POST /airtime/callback — USSD process signals a stage has completed.
 // Secured with x-airtime-secret header (or ?secret= query param) matching GROUPSHARE_CALLBACK_SECRET.
-// Body: { "stage": "load_312" } or { "stage": "load_500" }
+// Body: { "stage": "load_312"|"load_500" }
+// The callback fires regardless of whether the USSD succeeded or failed, so the server
+// ALWAYS verifies success by checking the portal GHC balance for an increase after the callback.
+// If no increase is detected the load command is retried (up to AIRTIME_MAX_RETRIES times).
 app.post('/airtime/callback', async (req, res) => {
   const expected = process.env.GROUPSHARE_CALLBACK_SECRET;
   if (expected) {
     const given = String(req.headers['x-airtime-secret'] || req.query.secret || '');
-    // Constant-time comparison; pad to same length to avoid length oracle
     const expBuf   = Buffer.from(expected, 'utf8');
     const givenBuf = Buffer.alloc(expBuf.length, 0);
     Buffer.from(given, 'utf8').copy(givenBuf);
@@ -970,53 +1116,174 @@ app.post('/airtime/callback', async (req, res) => {
   const { stage } = req.body || {};
   if (!stage) return res.status(400).json({ success: false, error: 'Missing stage' });
 
+  // ── Shared portal-credit verifier ───────────────────────────────────────────
+  // The phone sends airtime to the portal via USSD, so the portal GHC cash balance
+  // INCREASES after a successful transfer. Fetches a fresh portal balance and compares
+  // against the snapshot taken before the USSD was sent. Returns { verified, credited, note }.
+  async function verifyPortalCredit(acctBefore, expectedGhc, label) {
+    if (acctBefore == null) {
+      return {
+        verified: true,
+        credited: null,
+        note: `No portal baseline before ${label} — assuming success`,
+      };
+    }
+    console.log(`🔍 ${label}: checking portal account balance increase (expected ~GH¢ ${expectedGhc})…`);
+    const freshSl   = await waitForFreshAccountBalance(20000);
+    const acctAfter = freshSl._lastAccountBalance;
+    if (acctAfter == null) {
+      return {
+        verified: true,
+        credited: null,
+        note: `Portal balance unavailable after ${label} — assuming success`,
+      };
+    }
+    const credited = acctAfter - acctBefore;
+    if (credited >= expectedGhc - AIRTIME_BALANCE_TOLERANCE) {
+      return {
+        verified: true,
+        credited,
+        acctAfter,
+        note: `Portal confirmed GH¢ ${credited.toFixed(2)} received — USSD succeeded`,
+      };
+    }
+    return {
+      verified: false,
+      credited,
+      acctAfter,
+      note: `Portal: GH¢ ${credited.toFixed(2)} received (expected ~${expectedGhc}) — USSD failed`,
+    };
+  }
+
+  // ── load_312 callback ──────────────────────────────────────────────────────
   if (stage === 'load_312') {
-    // Deduplication guard — skip if load_500 was already dispatched
-    const currentStage = loadStatusLog()._airtimeStage;
-    if (currentStage === 'load_500_sent' || currentStage === 'done') {
-      console.log(`⚡ Duplicate load_312 callback ignored (stage already: ${currentStage})`);
-      return res.json({ success: true, action: 'already_sent' });
+    const sl = loadStatusLog();
+    if (sl._airtimeStage !== 'load_312_sent') {
+      console.log(`⚡ load_312 callback ignored (current stage: ${sl._airtimeStage})`);
+      return res.json({ success: true, action: 'ignored', currentStage: sl._airtimeStage });
     }
 
-    // load_312 complete — acknowledge immediately, then wait 5s before firing load_500
-    console.log('📲 Airtime load_312 triggered via callback');
-    updateStatusLog({ _airtimeStage: 'load_312_sent', _airtimeLastCallbackAt: new Date().toISOString() });
-    res.json({ success: true, action: 'load_312_received' });
+    console.log('📲 Airtime load_312 callback received — verifying via portal…');
+    updateStatusLog({ _airtimeStage: 'load_312_processing' }); // block re-entrant callbacks
 
-    // Wait 5 seconds, then dispatch load_500
-    await new Promise(r => setTimeout(r, 5000));
+    const { verified, credited, acctAfter, note: verificationNote } =
+      await verifyPortalCredit(sl._airtimeAcctBalBeforeLoad312, 312, 'load_312');
 
-    try {
-      const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
-      const r = await fetch(ntfyUrl, {
-        method: 'PUT',
-        body: 'load_500',
-      });
-      if (r.ok) {
-        console.log('📤 Airtime load_500 dispatched (5s after load_312 callback)');
-        updateStatusLog({ _airtimeStage: 'load_500_sent' });
-      } else {
-        const msg = `ntfy HTTP ${r.status}`;
-        console.warn(`⚠️  Airtime load_500 ntfy.sh returned ${r.status}`);
-        updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+    if (!verified) {
+      const retryCount = (sl._airtimeLoad312RetryCount ?? 0) + 1;
+      console.warn(`🔄 load_312 USSD failed — retry ${retryCount}/${AIRTIME_MAX_RETRIES}: ${verificationNote}`);
+
+      if (retryCount <= AIRTIME_MAX_RETRIES) {
+        updateStatusLog({
+          _airtimeStage: 'load_312_sent',
+          _airtimeLastCallbackAt: new Date().toISOString(),
+          _airtimeAcctBalBeforeLoad312: acctAfter ?? sl._airtimeAcctBalBeforeLoad312,
+          _airtimeLoad312RetryCount: retryCount,
+          _airtimeLastError: verificationNote,
+        });
+        res.json({ success: true, action: 'load_312_retry', verified: false, note: verificationNote });
+        await new Promise(r => setTimeout(r, 5000));
+        await dispatchLoad312Ntfy();
+        return;
       }
-    } catch (err) {
-      console.error(`❌ Airtime load_500 dispatch failed: ${err.message}`);
-      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
+      console.warn(`⚠️  load_312 max retries (${AIRTIME_MAX_RETRIES}) reached — proceeding to load_500 anyway`);
+    } else {
+      console.log(`✅ load_312 verified: ${verificationNote}`);
     }
+
+    updateStatusLog({
+      _airtimeStage: 'load_312_verified',
+      _airtimeLastCallbackAt: new Date().toISOString(),
+      _airtimeLoad312Verified: verified,
+      _airtimeLoad312RetryCount: 0,
+      _airtimeLoad500Count: 0,
+      _airtimeLoad500TotalAdded: 0,
+      _airtimeLoad500SentCount: 0,
+    });
+
+    res.json({ success: true, action: 'load_312_received', verified, note: verificationNote });
+    await new Promise(r => setTimeout(r, 5000));
+    await dispatchLoad500Ntfy(1);
     return;
   }
 
+  // ── load_500 callback ──────────────────────────────────────────────────────
   if (stage === 'load_500') {
-    // Deduplication guard — skip if already marked done
-    if (loadStatusLog()._airtimeStage === 'done') {
-      console.log('⚡ Duplicate load_500 callback ignored (already done)');
+    const sl = loadStatusLog();
+
+    if (sl._airtimeStage === 'done') {
+      console.log('⚡ load_500 callback ignored (already done)');
       return res.json({ success: true, action: 'already_done' });
     }
+    if (sl._airtimeStage !== 'load_500_sent') {
+      console.log(`⚡ load_500 callback ignored (current stage: ${sl._airtimeStage})`);
+      return res.json({ success: true, action: 'ignored', currentStage: sl._airtimeStage });
+    }
 
-    console.log('📲 Airtime load_500 triggered via callback');
-    updateStatusLog({ _airtimeStage: 'done', _airtimeLastCallbackAt: new Date().toISOString() });
-    return res.json({ success: true, action: 'done' });
+    const prevCount  = sl._airtimeLoad500Count ?? 0;
+    const newCount   = prevCount + 1;
+    let   totalAdded = sl._airtimeLoad500TotalAdded ?? 0;
+
+    console.log(`📲 Airtime load_500 round ${newCount} callback received — verifying via portal…`);
+    updateStatusLog({ _airtimeStage: 'load_500_processing' }); // block re-entrant callbacks
+
+    const { verified, credited, acctAfter, note: verificationNote } =
+      await verifyPortalCredit(sl._airtimeAcctBalBeforeLoad500, 500, `load_500 round ${newCount}`);
+
+    if (!verified) {
+      const retryCount = (sl._airtimeLoad500RetryCount ?? 0) + 1;
+      console.warn(`🔄 load_500 round ${newCount} USSD failed — retry ${retryCount}/${AIRTIME_MAX_RETRIES}: ${verificationNote}`);
+
+      if (retryCount <= AIRTIME_MAX_RETRIES) {
+        updateStatusLog({
+          _airtimeStage: 'load_500_sent',
+          _airtimeLastCallbackAt: new Date().toISOString(),
+          _airtimeAcctBalBeforeLoad500: acctAfter ?? sl._airtimeAcctBalBeforeLoad500,
+          _airtimeLoad500RetryCount: retryCount,
+          _airtimeLastError: verificationNote,
+        });
+        res.json({ success: true, action: `load_500_round_${newCount}_retry`, verified: false, note: verificationNote });
+        await new Promise(r => setTimeout(r, 5000));
+        await dispatchLoad500Ntfy(newCount); // retry same round
+        return;
+      }
+      console.warn(`⚠️  load_500 round ${newCount} max retries (${AIRTIME_MAX_RETRIES}) reached — skipping round`);
+      // Skipped round: credited amount (0 or partial) is not counted toward target
+    } else {
+      console.log(`✅ load_500 round ${newCount} verified: ${verificationNote}`);
+      totalAdded += credited ?? 500; // credited is always set when verified=true with a baseline
+    }
+
+    const isDone = newCount >= AIRTIME_LOAD500_MAX_ROUNDS || totalAdded >= AIRTIME_LOAD500_TARGET_GHC;
+
+    console.log(`📊 load_500 round ${newCount}/${AIRTIME_LOAD500_MAX_ROUNDS} — total added: GH¢ ${totalAdded.toFixed(2)}/${AIRTIME_LOAD500_TARGET_GHC} — done: ${isDone}`);
+
+    updateStatusLog({
+      _airtimeStage: isDone ? 'done' : 'load_500_processing',
+      _airtimeLastCallbackAt: new Date().toISOString(),
+      _airtimeLoad500Count: newCount,
+      _airtimeLoad500TotalAdded: totalAdded,
+      _airtimeLoad500RetryCount: 0,
+    });
+
+    if (isDone) {
+      console.log(`🎉 Airtime load complete! ${newCount} round(s), GH¢ ${totalAdded.toFixed(2)} total added`);
+      return res.json({ success: true, action: 'done', rounds: newCount, totalAdded });
+    }
+
+    res.json({
+      success: true,
+      action: `load_500_round_${newCount}_complete`,
+      verified,
+      note: verificationNote,
+      roundsCompleted: newCount,
+      roundsRemaining: AIRTIME_LOAD500_MAX_ROUNDS - newCount,
+      totalAdded,
+    });
+
+    await new Promise(r => setTimeout(r, 5000));
+    await dispatchLoad500Ntfy(newCount + 1);
+    return;
   }
 
   return res.status(400).json({ success: false, error: `Unknown stage: ${stage}` });

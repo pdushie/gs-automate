@@ -136,17 +136,20 @@ async function triggerAirtimeLoad() {
   const sl = loadStatusLog();
   if (!sl._airtimeEnabled) return;
 
-  // UTC time-window check
-  const nowHour  = new Date().getUTCHours();
-  const winStart = sl._airtimeWindowStart ?? 0;
-  const winEnd   = sl._airtimeWindowEnd   ?? 24;
-  // Support overnight windows (e.g. 22–6)
+  // UTC time-window check (stored as minutes since midnight; legacy hour values ≤24 auto-multiplied)
+  const _nowUtc  = new Date();
+  const nowMins  = _nowUtc.getUTCHours() * 60 + _nowUtc.getUTCMinutes();
+  const normWin  = v => (v == null ? null : v <= 24 ? v * 60 : v);
+  const winStart = normWin(sl._airtimeWindowStart) ?? 0;
+  const winEnd   = normWin(sl._airtimeWindowEnd)   ?? 1440;
+  // Support overnight windows (e.g. 22:00–06:00 = start 1320, end 360)
   const inWindow = winStart <= winEnd
-    ? (nowHour >= winStart && nowHour < winEnd)
-    : (nowHour >= winStart || nowHour < winEnd);
+    ? (nowMins >= winStart && nowMins < winEnd)
+    : (nowMins >= winStart || nowMins < winEnd);
+  const fmtMins  = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
   if (!inWindow) {
-    console.log(`⏰ Airtime load skipped — outside UTC window (${winStart}:00–${winEnd}:00, now ${nowHour}:xx UTC)`);
+    console.log(`⏰ Airtime load skipped — outside UTC window (${fmtMins(winStart)}–${fmtMins(winEnd)}, now ${fmtMins(nowMins)} UTC)`);
     return;
   }
 
@@ -158,7 +161,19 @@ async function triggerAirtimeLoad() {
     });
     if (res.ok) {
       console.log('📲 Airtime trigger sent: load_312');
-      updateStatusLog({ _airtimeStage: 'load_312_sent', _airtimeTriggeredAt: new Date().toISOString() });
+      updateStatusLog({
+        _airtimeStage: 'load_312_sent',
+        _airtimeTriggeredAt: new Date().toISOString(),
+        _airtimeLoad500Count: 0,
+        _airtimeLoad500TotalAdded: 0,
+        _airtimeLoad500SentCount: 0,
+        _airtimeLoad312Verified: false,
+        _airtimeLoad312RetryCount: 0,
+        _airtimeLoad500RetryCount: 0,
+        // Snapshot portal account balance so the credit verifier can confirm
+        // the phone's airtime transfer arrived at the portal after the USSD
+        _airtimeAcctBalBeforeLoad312: sl._lastAccountBalance ?? null,
+      });
     } else {
       const msg = `ntfy HTTP ${res.status}`;
       console.warn(`⚠️  Airtime ntfy.sh returned ${res.status}`);
@@ -369,17 +384,38 @@ async function login(page) {
 async function purchaseData(page, context) {
   console.log('\n💳 Starting data purchase...');
 
-  await page.goto('https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
+  const REQUIRED = 4812.96;
 
-  // Read account balance
+  // ── Pre-check: fetch real-time balance via API BEFORE navigating to the purchase page ──
+  // This avoids false "insufficient balance" alerts caused by stale DOM values on page load.
+  const { accountBalance: apiAccountBalance, accountBalanceText: apiAccountBalanceText } = await checkBalance(page, context);
+  if (apiAccountBalance != null) {
+    const displayText = apiAccountBalanceText || `GH¢ ${apiAccountBalance.toLocaleString()}`;
+    console.log(`💰 Account balance (API pre-check): ${displayText}`);
+    if (apiAccountBalance < REQUIRED) {
+      const msg = `Insufficient account balance. Required: GH¢ ${REQUIRED.toLocaleString()}, Available: ${displayText}`;
+      console.warn(`⚠️  ${msg}`);
+      sendAlert('⚠️ MTN GroupShare — Cannot Purchase Data', msg);
+      updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+      return false;
+    }
+    console.log(`✅ Account balance sufficient (API pre-check) — proceeding to purchase page`);
+  } else {
+    console.log('ℹ️  Account balance not available via API — will verify on purchase page');
+  }
+
+  await page.goto('https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
+  // Reload to flush any cached balance value the page may render on first load
+  await page.reload({ waitUntil: 'networkidle' });
+
+  // Read account balance from DOM (secondary verification)
   await page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { timeout: 15000 });
   const balanceText = await page.$eval('h3[data-bind*="BalanceFormatted"]', el => el.innerText.trim());
-  console.log(`💰 Account balance: ${balanceText}`);
+  console.log(`💰 Account balance (purchase page): ${balanceText}`);
 
   // Parse "GH¢ 4,822.11" → 4822.11
   const balanceMatch = balanceText.replace(/,/g, '').match(/([\d.]+)/);
   const balance = balanceMatch ? parseFloat(balanceMatch[1]) : 0;
-  const REQUIRED = 4812.96;
 
   if (balance < REQUIRED) {
     const msg = `Insufficient account balance. Required: GH¢ ${REQUIRED.toLocaleString()}, Available: ${balanceText}`;
@@ -478,13 +514,23 @@ async function checkBalance(page, context) {
       if (data.success && data.body && typeof data.body.DataBalanceMB === 'number') {
         const totalMB = data.body.DataBalanceMB;
         const balanceText = data.body.DataBalanceFormatted || `${(totalMB / 1024).toFixed(2)} GB`;
-        console.log(`💰 Balance (API): ${balanceText} (${totalMB.toFixed(2)} MB)`);
-        updateStatusLog({
+        // Also capture account (GHC cash) balance if the API returns it
+        const accountBalance     = typeof data.body.Balance        === 'number' ? data.body.Balance        : null;
+        const accountBalanceText = typeof data.body.BalanceFormatted === 'string' ? data.body.BalanceFormatted : null;
+        console.log(`💰 Balance (API): ${balanceText} (${totalMB.toFixed(2)} MB)${
+          accountBalance != null ? ` | Account: ${accountBalanceText || 'GH\u00a2 ' + accountBalance}` : ''
+        }`);
+        const statusUpdates = {
           _lastBalance: balanceText,
           _lastBalanceMB: totalMB,
           _lastBalanceCheckedAt: new Date().toISOString(),
-        });
-        return { balanceText, totalMB };
+        };
+        if (accountBalance != null) {
+          statusUpdates._lastAccountBalance     = accountBalance;
+          statusUpdates._lastAccountBalanceText = accountBalanceText;
+        }
+        updateStatusLog(statusUpdates);
+        return { balanceText, totalMB, accountBalance, accountBalanceText };
       }
       console.warn('⚠️ Balance API returned unexpected response — falling back to DOM scrape');
     } catch (apiErr) {
@@ -618,6 +664,7 @@ async function uploadFile(page, excelFile) {
 
     await statusNavPromise;
     console.log('✅ Status page loaded — polling for DONE...');
+    updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
   } catch (navErr) {
     console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
     await page.screenshot({ path: `nav-error-${fileName}.png` });
@@ -665,6 +712,7 @@ async function uploadFile(page, excelFile) {
       });
       sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
       console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
+      await sendCallback(excelFile.name, 'ABANDONED', new Date().toISOString());
     } else {
       updateStatusLog({
         [excelFile.name]: 'TIMEOUT',
@@ -757,6 +805,7 @@ async function uploadFile(page, excelFile) {
         `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`
       );
       await page.screenshot({ path: `abandoned-${fileName}.png` });
+      await sendCallback(excelFile.name, 'ABANDONED', new Date().toISOString());
     } else {
       updateStatusLog({
         [excelFile.name]: 'TIMEOUT',
