@@ -618,14 +618,16 @@ app.get('/status', (req, res) => {
     const aDone = DONE_STATES.has(a.status);
     const bDone = DONE_STATES.has(b.status);
     if (aDone && bDone) {
-      // Both finished — most recently completed first
+      // Both finished — most recently completed first, then filename A→Z
       const aTime = a.completedAt || 0;
       const bTime = b.completedAt || 0;
-      return bTime > aTime ? 1 : bTime < aTime ? -1 : 0;
+      if (bTime > aTime) return  1;
+      if (bTime < aTime) return -1;
+      return a.filename.localeCompare(b.filename);
     }
     if (aDone) return -1; // finished before not-finished
     if (bDone) return  1;
-    return 0; // preserve original order for pending/active
+    return a.filename.localeCompare(b.filename); // pending/active: filename A→Z
   });
 
   res.json({ success: true, files: allFiles });
@@ -899,11 +901,13 @@ app.get('/summary', requireAuth, (req, res) => {
     const aFinished = FINISHED.has(a.status);
     const bFinished = FINISHED.has(b.status);
 
-    // Finished files: sort by completedAt/failedAt descending (most recent first)
+    // Finished files: sort by completedAt descending (most recent first), then filename A→Z
     if (aFinished && bFinished) {
       const aTime = a.completedAt || a.failedAt || 0;
       const bTime = b.completedAt || b.failedAt || 0;
-      return bTime > aTime ? 1 : bTime < aTime ? -1 : 0;
+      if (bTime > aTime) return  1;
+      if (bTime < aTime) return -1;
+      return a.filename.localeCompare(b.filename);
     }
     if (aFinished) return -1;
     if (bFinished) return  1;
@@ -911,7 +915,8 @@ app.get('/summary', requireAuth, (req, res) => {
     // Non-finished: sort by queuePosition ascending (0 = active, then 1, 2, 3…)
     const aPos = a.queuePosition ?? Infinity;
     const bPos = b.queuePosition ?? Infinity;
-    return aPos - bPos;
+    if (aPos !== bPos) return aPos - bPos;
+    return a.filename.localeCompare(b.filename);
   });
 
   const queue = {
@@ -976,26 +981,65 @@ const AIRTIME_LOAD500_TARGET_GHC = 4500;
 const AIRTIME_BALANCE_TOLERANCE  = 50; // GHC — acceptable shortfall when verifying balance increase
 const AIRTIME_MAX_RETRIES        = 2;  // max retry attempts per stage before proceeding anyway
 
-// Request a fresh balance from the bot and wait up to timeoutMs for it.
-// Returns the updated status log, or the current one if the bot doesn't respond in time.
+// Fetch the portal account balance directly from the MTN up2u API using the
+// session cookies persisted by the bot. Falls back to the signalling mechanism
+// (requesting a fresh read from the Playwright bot) if no cookies are available.
 async function waitForFreshAccountBalance(timeoutMs = 20000) {
+  // ── Fast path: call the API directly with stored session cookies ──────────
+  const sl = loadStatusLog();
+  const cookieHeader = sl._portalCookieHeader;
+  if (cookieHeader) {
+    try {
+      const res = await fetch('https://up2u.mtn.com.gh/providers/api/check-balance', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Cookie': cookieHeader,
+          'Origin': 'https://up2u.mtn.com.gh',
+          'Referer': 'https://up2u.mtn.com.gh/',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.success && data.body && typeof data.body.MainAccountBalanceCedis === 'number') {
+        const accountBalance     = data.body.MainAccountBalanceCedis;
+        const accountBalanceText = `GH¢ ${accountBalance.toFixed(2)}`;
+        console.log(`✅ Portal balance fetched directly: ${accountBalanceText}`);
+        // Write the fresh value back so the status log stays current
+        updateStatusLog({
+          _lastAccountBalance:     accountBalance,
+          _lastAccountBalanceText: accountBalanceText,
+          _lastBalanceCheckedAt:   new Date().toISOString(),
+        });
+        return loadStatusLog();
+      }
+      console.warn('⚠️  check-balance API returned unexpected response — falling back to bot signal');
+    } catch (err) {
+      console.warn(`⚠️  check-balance API call failed: ${err.message} — falling back to bot signal`);
+    }
+  }
+
+  // ── Fallback: signal bot and wait for it to do a Playwright balance read ──
+  console.log('🔄 No stored cookies — requesting balance refresh from bot…');
   const requestedAt = Date.now();
   withFileLock(STATUS_LOG, () => {
-    const sl = loadStatusLog();
-    saveStatusLog({ ...sl, _balanceRefreshRequested: true });
+    const s = loadStatusLog();
+    saveStatusLog({ ...s, _balanceRefreshRequested: true });
   });
 
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 1500));
-    const sl = loadStatusLog();
-    const checkedAt = sl._lastBalanceCheckedAt;
-    if (!sl._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
-      console.log('✅ Portal balance refreshed for USSD verification');
-      return sl;
+    const s = loadStatusLog();
+    const checkedAt = s._lastBalanceCheckedAt;
+    if (!s._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
+      console.log('✅ Portal balance refreshed via bot');
+      return s;
     }
   }
-  // Timed out — clear the stale flag and return what we have
+  // Timed out
   withFileLock(STATUS_LOG, () => {
     const s = loadStatusLog();
     if (s._balanceRefreshRequested) saveStatusLog({ ...s, _balanceRefreshRequested: false });

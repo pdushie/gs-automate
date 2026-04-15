@@ -136,9 +136,10 @@ async function triggerAirtimeLoad() {
   const sl = loadStatusLog();
   if (!sl._airtimeEnabled) return;
 
-  // UTC time-window check (stored as minutes since midnight; legacy hour values ≤24 auto-multiplied)
-  const _nowUtc  = new Date();
-  const nowMins  = _nowUtc.getUTCHours() * 60 + _nowUtc.getUTCMinutes();
+  // Time-window check using server local time (server must be set to GMT+0 / UTC).
+  // Stored as minutes since midnight; legacy whole-hour values ≤24 are auto-multiplied.
+  const _now    = new Date();
+  const nowMins = _now.getHours() * 60 + _now.getMinutes();
   const normWin  = v => (v == null ? null : v <= 24 ? v * 60 : v);
   const winStart = normWin(sl._airtimeWindowStart) ?? 0;
   const winEnd   = normWin(sl._airtimeWindowEnd)   ?? 1440;
@@ -514,16 +515,17 @@ async function checkBalance(page, context) {
       if (data.success && data.body && typeof data.body.DataBalanceMB === 'number') {
         const totalMB = data.body.DataBalanceMB;
         const balanceText = data.body.DataBalanceFormatted || `${(totalMB / 1024).toFixed(2)} GB`;
-        // Also capture account (GHC cash) balance if the API returns it
-        const accountBalance     = typeof data.body.Balance        === 'number' ? data.body.Balance        : null;
-        const accountBalanceText = typeof data.body.BalanceFormatted === 'string' ? data.body.BalanceFormatted : null;
+        // Capture main account (GHC airtime) balance from the portal API
+        const accountBalance     = typeof data.body.MainAccountBalanceCedis === 'number' ? data.body.MainAccountBalanceCedis : null;
+        const accountBalanceText = accountBalance != null ? `GH¢ ${accountBalance.toFixed(2)}` : null;
         console.log(`💰 Balance (API): ${balanceText} (${totalMB.toFixed(2)} MB)${
-          accountBalance != null ? ` | Account: ${accountBalanceText || 'GH\u00a2 ' + accountBalance}` : ''
+          accountBalance != null ? ` | Main Account: GH¢ ${accountBalance.toFixed(2)}` : ''
         }`);
         const statusUpdates = {
           _lastBalance: balanceText,
           _lastBalanceMB: totalMB,
           _lastBalanceCheckedAt: new Date().toISOString(),
+          _portalCookieHeader: cookieHeader,  // persisted so api-server can call check-balance directly
         };
         if (accountBalance != null) {
           statusUpdates._lastAccountBalance     = accountBalance;
