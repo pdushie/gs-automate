@@ -132,7 +132,7 @@ async function sendCallback(filename, status, completedAt) {
 
 // Fire-and-forget: send `load_312` to ntfy.sh to kick off the airtime loading sequence.
 // Respects the _airtimeEnabled flag and the configured UTC time window in the status log.
-async function triggerAirtimeLoad() {
+async function triggerAirtimeLoad(page, context) {
   const sl = loadStatusLog();
   if (!sl._airtimeEnabled) return;
 
@@ -143,46 +143,179 @@ async function triggerAirtimeLoad() {
   const normWin  = v => (v == null ? null : v <= 24 ? v * 60 : v);
   const winStart = normWin(sl._airtimeWindowStart) ?? 0;
   const winEnd   = normWin(sl._airtimeWindowEnd)   ?? 1440;
-  // Support overnight windows (e.g. 22:00–06:00 = start 1320, end 360)
   const inWindow = winStart <= winEnd
     ? (nowMins >= winStart && nowMins < winEnd)
     : (nowMins >= winStart || nowMins < winEnd);
   const fmtMins  = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
   if (!inWindow) {
-    console.log(`⏰ Airtime load skipped — outside UTC window (${fmtMins(winStart)}–${fmtMins(winEnd)}, now ${fmtMins(nowMins)} UTC)`);
+    console.log(`⏰ Airtime load skipped — outside time window (${fmtMins(winStart)}–${fmtMins(winEnd)}, now ${fmtMins(nowMins)})`);
     return;
   }
 
-  try {
-    const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
-    const res = await fetch(ntfyUrl, {
-      method: 'PUT',
-      body: 'load_312',
-    });
-    if (res.ok) {
-      console.log('📲 Airtime trigger sent: load_312');
-      updateStatusLog({
-        _airtimeStage: 'load_312_sent',
-        _airtimeTriggeredAt: new Date().toISOString(),
-        _airtimeLoad500Count: 0,
-        _airtimeLoad500TotalAdded: 0,
-        _airtimeLoad500SentCount: 0,
-        _airtimeLoad312Verified: false,
-        _airtimeLoad312RetryCount: 0,
-        _airtimeLoad500RetryCount: 0,
-        // Snapshot portal account balance so the credit verifier can confirm
-        // the phone's airtime transfer arrived at the portal after the USSD
-        _airtimeAcctBalBeforeLoad312: sl._lastAccountBalance ?? null,
-      });
-    } else {
-      const msg = `ntfy HTTP ${res.status}`;
-      console.warn(`⚠️  Airtime ntfy.sh returned ${res.status}`);
-      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+  const NTFY_URL     = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
+  const TOLERANCE    = 50;   // GH¢ shortfall allowed when verifying increase
+  const MAX_RETRIES  = 2;    // extra attempts per stage if balance doesn’t move
+  const LOAD500_TARGET = 4500;
+  const LOAD500_MAX_ROUNDS = 9;
+
+  async function sendNtfy(cmd) {
+    const r = await fetch(NTFY_URL, { method: 'PUT', body: cmd });
+    if (!r.ok) throw new Error(`ntfy returned HTTP ${r.status}`);
+  }
+
+  async function getPortalBalance() {
+    const { accountBalance } = await checkBalance(page, context);
+    return accountBalance;
+  }
+
+  // ── load_312 ─────────────────────────────────────────────────────────
+  console.log('\n💰 Airtime load starting — sending load_312…');
+  updateStatusLog({
+    _airtimeStage:           'load_312_sent',
+    _airtimeTriggeredAt:     new Date().toISOString(),
+    _airtimeLoad500Count:    0,
+    _airtimeLoad500TotalAdded: 0,
+    _airtimeLoad312Verified: false,
+  });
+
+  let balBefore312   = await getPortalBalance();
+  let load312Success = false;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+    try {
+      console.log(`📲 load_312 attempt ${attempt}/${MAX_RETRIES + 1}…`);
+      await sendNtfy('load_312');
+    } catch (err) {
+      console.error(`❌ load_312 ntfy failed: ${err.message}`);
+      break;
     }
-  } catch (err) {
-    console.error(`❌ Airtime trigger failed: ${err.message}`);
-    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
+
+    console.log('⏳ Waiting 20s for load_312 to process…');
+    await new Promise(r => setTimeout(r, 20000));
+
+    const balAfter  = await getPortalBalance();
+    if (balBefore312 == null || balAfter == null) {
+      console.warn(`⚠️  load_312 attempt ${attempt}: balance unavailable (before=${balBefore312}, after=${balAfter}) — assuming success`);
+      updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: true });
+      load312Success = true;
+      break;
+    }
+    const credited  = balAfter - balBefore312;
+    console.log(`📊 load_312 attempt ${attempt}: portal balance ${balBefore312} → ${balAfter} (credited GH¢ ${credited.toFixed(2)})`);
+
+    if (credited >= 312 - TOLERANCE) {
+      console.log(`✅ load_312 verified: GH¢ ${credited.toFixed(2)} received`);
+      updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: true });
+      load312Success = true;
+      break;
+    }
+
+    if (attempt <= MAX_RETRIES) {
+      console.warn(`⚠️  load_312 attempt ${attempt} insufficient (GH¢ ${credited.toFixed(2)}) — retrying…`);
+      balBefore312 = balAfter; // use latest balance as baseline for next attempt
+    }
+  }
+
+  if (!load312Success) {
+    console.warn('⚠️  load_312 not confirmed after all attempts — proceeding to load_500 anyway');
+    updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: false });
+  }
+
+  // Check total increase after load_312 — may already be enough
+  const afterLoad312Inc = await totalIncrease();
+  if (afterLoad312Inc != null && afterLoad312Inc >= TOTAL_TARGET - TOLERANCE) {
+    console.log(`✅ Total target reached after load_312 (GH¢ ${afterLoad312Inc.toFixed(2)}) — skipping load_500`);
+    updateStatusLog({ _airtimeStage: 'done', _airtimeLoad500TotalAdded: afterLoad312Inc });
+    sendAlert('🎉 MTN GroupShare — Airtime Loaded', `GH¢ ${afterLoad312Inc.toFixed(2)} added to portal`);
+    return;
+  }
+
+  // ── load_500 loop ──────────────────────────────────────────────────
+  let totalAdded = 0;
+  let round      = 0;
+
+  while (round < LOAD500_MAX_ROUNDS) {
+    // Check total increase from initial baseline before each round
+    const incNow = await totalIncrease();
+    if (incNow != null && incNow >= TOTAL_TARGET - TOLERANCE) {
+      console.log(`✅ Total target reached (GH¢ ${incNow.toFixed(2)} increase) — stopping load_500`);
+      totalAdded = incNow;
+      break;
+    }
+    round++;
+
+    console.log(`\n⏳ Waiting 30s before load_500 round ${round}…`);
+    await new Promise(r => setTimeout(r, 30000));
+
+    let balBefore500  = await getPortalBalance();
+    let roundSuccess  = false;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
+      try {
+        console.log(`📲 load_500 round ${round}/${LOAD500_MAX_ROUNDS} attempt ${attempt}/${MAX_RETRIES + 1}…`);
+        updateStatusLog({ _airtimeStage: 'load_500_sent', _airtimeLoad500SentCount: round });
+        await sendNtfy('load_500');
+      } catch (err) {
+        console.error(`❌ load_500 round ${round} ntfy failed: ${err.message}`);
+        break;
+      }
+
+      console.log('⏳ Waiting 20s for load_500 to process…');
+      await new Promise(r => setTimeout(r, 20000));
+
+      const balAfter = await getPortalBalance();
+      if (balBefore500 == null || balAfter == null) {
+        console.warn(`⚠️  load_500 round ${round} attempt ${attempt}: balance unavailable (before=${balBefore500}, after=${balAfter}) — assuming success`);
+        totalAdded += 500;
+        updateStatusLog({
+          _airtimeStage:            'load_500_processing',
+          _airtimeLoad500Count:     round,
+          _airtimeLoad500TotalAdded: totalAdded,
+        });
+        roundSuccess = true;
+        break;
+      }
+      const credited = balAfter - balBefore500;
+      console.log(`📊 load_500 round ${round} attempt ${attempt}: ${balBefore500} → ${balAfter} (credited GH¢ ${credited.toFixed(2)})`);
+
+      if (credited >= 500 - TOLERANCE) {
+        totalAdded += credited;
+        const incFromBase = await totalIncrease();
+        console.log(`✅ load_500 round ${round} verified: GH¢ ${credited.toFixed(2)} received — total increase from baseline: GH¢ ${incFromBase != null ? incFromBase.toFixed(2) : totalAdded.toFixed(2)}`);
+        updateStatusLog({
+          _airtimeStage:             'load_500_processing',
+          _airtimeLoad500Count:      round,
+          _airtimeLoad500TotalAdded: totalAdded,
+        });
+        roundSuccess = true;
+        break;
+      }
+
+      if (attempt <= MAX_RETRIES) {
+        console.warn(`⚠️  load_500 round ${round} attempt ${attempt} insufficient (GH¢ ${credited.toFixed(2)}) — retrying…`);
+        balBefore500 = balAfter;
+      }
+    }
+
+    if (!roundSuccess) {
+      console.warn(`⚠️  load_500 round ${round} not confirmed after all attempts — skipping round`);
+      updateStatusLog({ _airtimeLoad500Count: round });
+    }
+  }
+
+  // ── Summary ───────────────────────────────────────────────────────────
+  // Use real total increase from initial baseline for final accounting
+  const finalIncrease = (await totalIncrease()) ?? totalAdded;
+  updateStatusLog({ _airtimeStage: 'done', _airtimeLoad500TotalAdded: finalIncrease, _airtimeLoad500Count: round });
+
+  if (finalIncrease >= TOTAL_TARGET - TOLERANCE) {
+    console.log(`🎉 Airtime load complete! GH¢ ${finalIncrease.toFixed(2)} total increase in ${round} round(s)`);
+    sendAlert('🎉 MTN GroupShare — Airtime Loaded', `GH¢ ${finalIncrease.toFixed(2)} added to portal in ${round} load_500 round(s)`);
+  } else {
+    const msg = `GH¢ ${finalIncrease.toFixed(2)} / GH¢ ${TOTAL_TARGET} increase after ${round} round(s)`;
+    console.warn(`⚠️  Airtime load incomplete: ${msg}`);
+    sendAlert('⚠️ MTN GroupShare — Airtime Load Incomplete', msg);
   }
 }
 
@@ -486,8 +619,8 @@ async function purchaseData(page, context) {
   console.log('🎉 Data purchase complete!');
   sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText}`);
   updateStatusLog({ _purchaseStatus: 'DONE', _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`, _purchaseCompletedAt: new Date().toISOString() });
-  // Kick off airtime loading sequence — fire-and-forget, does not block the purchase flow
-  triggerAirtimeLoad().catch(err => console.error(`❌ Airtime trigger error: ${err.message}`));
+  // Kick off airtime loading sequence — awaited so it runs before the purchase flow returns
+  triggerAirtimeLoad(page, context).catch(err => console.error(`❌ Airtime trigger error: ${err.message}`));
   return true;
 }
 
