@@ -191,8 +191,8 @@ async function triggerAirtimeLoad(page, context) {
       break;
     }
 
-    console.log('⏳ Waiting 20s for load_312 to process…');
-    await new Promise(r => setTimeout(r, 20000));
+    console.log('⏳ Waiting 35s for load_312 to process…');
+    await new Promise(r => setTimeout(r, 35000));
 
     const balAfter  = await getPortalBalance();
     if (balBefore312 == null || balAfter == null) {
@@ -261,8 +261,8 @@ async function triggerAirtimeLoad(page, context) {
         break;
       }
 
-      console.log('⏳ Waiting 20s for load_500 to process…');
-      await new Promise(r => setTimeout(r, 20000));
+      console.log('⏳ Waiting 35s for load_500 to process…');
+      await new Promise(r => setTimeout(r, 35000));
 
       const balAfter = await getPortalBalance();
       if (balBefore500 == null || balAfter == null) {
