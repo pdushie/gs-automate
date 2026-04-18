@@ -448,12 +448,10 @@ async function login(page) {
       await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
       await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
       await page.fill('input[name="Pin"]', process.env.MTN_PIN);
-      await page.waitForSelector('#login-btn', { state: 'visible', timeout: 15000 });
-      await page.click('#login-btn');
+      await page.dispatchEvent('#login-btn', 'click');
       console.log('🚀 Login clicked');
-      await page.screenshot({ path: 'login-after-click.png', fullPage: true });
 
-      await page.waitForURL('**/account/verify-otp', { timeout: 60000, waitUntil: 'domcontentloaded' });
+      await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
     }
 
     // ── Phase 2+3: For each attempt, wait for OTP FIRST then submit ────────
@@ -488,10 +486,9 @@ async function login(page) {
 
         const navigationPromise = page.waitForURL(
           url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
-          { timeout: 60000, waitUntil: 'domcontentloaded' }
+          { timeout: 60000, waitUntil: 'networkidle' }
         );
-        await page.waitForSelector('#login-btn', { state: 'visible', timeout: 10000 });
-        await page.click('#login-btn');
+        await page.dispatchEvent('#login-btn', 'click');
         await navigationPromise;
 
         if (await isSessionActive(page)) {
