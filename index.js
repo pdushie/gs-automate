@@ -461,8 +461,7 @@ async function login(page) {
       if (attempt === 1) {
         console.log('\n⏳ Waiting for OTP SMS (up to 10 mins)...');
       } else {
-        // Discard any stale buffered OTP so we wait for a brand-new one
-        resetOtpState(true);
+        resetOtpState();
         console.log(`\n⏳ Waiting for fresh OTP for retry ${attempt}/${maxSubmitAttempts} (up to 5 mins)...`);
       }
 

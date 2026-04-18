@@ -8,8 +8,6 @@ app.use(express.urlencoded({ extended: true }));
 
 let otpResolve = null;
 let otpTimer = null;
-let otpBuffer = null; // { otp, receivedAt } — holds OTP that arrived before waitForOTP was called
-const OTP_BUFFER_TTL_MS = 5 * 60 * 1000; // buffer valid for 5 minutes
 
 // ── OTP RECEIVER ───────────────────────────────────────────
 app.post('/otp', (req, res) => {
@@ -53,10 +51,9 @@ app.post('/otp', (req, res) => {
     otpResolve = null;
     return res.json({ success: true, otp });
   } else {
-    console.log('⚠️  OTP received but no script is currently waiting — buffering for next waitForOTP call');
-    otpBuffer = { otp, receivedAt: Date.now() };
+    console.log('⚠️  OTP received but no script is currently waiting — discarding to avoid stale reuse');
     // Return 200 so SMS forwarder does not keep retrying
-    return res.json({ received: true, note: 'No script waiting — OTP buffered' });
+    return res.json({ received: true, note: 'No script waiting — OTP discarded' });
   }
 });
 
@@ -70,25 +67,15 @@ app.get('/', (req, res) => {
 });
 
 // ── WAIT FOR OTP ───────────────────────────────────────────
-function resetOtpState(clearBuffer = false) {
+function resetOtpState() {
   if (otpTimer) {
     clearTimeout(otpTimer);
     otpTimer = null;
   }
   otpResolve = null;
-  if (clearBuffer) otpBuffer = null;
 }
 
 function waitForOTP(timeoutMs = 180000) {
-  // If an OTP arrived recently while no waiter was registered, use it immediately
-  if (otpBuffer && (Date.now() - otpBuffer.receivedAt) < OTP_BUFFER_TTL_MS) {
-    const buffered = otpBuffer.otp;
-    otpBuffer = null;
-    console.log(`✅ Using buffered OTP: ${buffered}`);
-    resetOtpState();
-    return Promise.resolve(buffered);
-  }
-
   // Clear any lingering state from a previous timed-out or failed call
   resetOtpState();
 
