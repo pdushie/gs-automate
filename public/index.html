@@ -769,8 +769,6 @@ function tabGroup(status) {
   return 'PENDING';
 }
 
-const SORT = { IN_PROGRESS:0, PROCESSING:1, PENDING:2, TIMEOUT:3, DONE:4, FAILED:5, ABANDONED:6 };
-
 /* ── Fetch ───────────────────────────────── */
 async function fetchSummary() {
   const r = await fetch('/summary');
@@ -927,13 +925,17 @@ function renderTable(files, q) {
     const completedIso = f.completedAt || f.failedAt || f.timedOutAt || null;
 
     // Detail content
-    const details = [
+    const detailRows = [
       ['Full filename',   f.filename],
       ['Queue position',  f.queuePosition != null ? (f.queuePosition === 0 ? 'Currently active' : `#${f.queuePosition}`) : '—'],
       ['Started',         f.startedAt   ? fmtDate(f.startedAt)  + ' (' + new Date(f.startedAt).toLocaleString() + ')' : '—'],
       ['Completed',       completedIso  ? fmtDate(completedIso) + ' (' + new Date(completedIso).toLocaleString() + ')' : '—'],
       ['Retry count',     f.retryCount  ? String(f.retryCount) : '0'],
-    ].map(([k, v]) => `<div class="detail-item"><strong>${k}</strong>${esc(v)}</div>`).join('');
+    ];
+    if (f.mergedBatch) {
+      detailRows.push(['Uploaded as (portal name)', f.mergedBatch]);
+    }
+    const details = detailRows.map(([k, v]) => `<div class="detail-item"><strong>${k}</strong>${esc(v)}</div>`).join('');
 
     return `
     <tr class="${isNext ? 'row-next' : ''}" onclick="toggleDetail('${detId}')">
@@ -980,15 +982,39 @@ function applyView() {
     });
   }
 
-  // Sort: active/next first, then by queue position within pending, then by status
+  // Sort:
+  //   1. Finished (DONE/FAILED/ABANDONED) — most recently completed first, at the TOP
+  //   2. Active (IN_PROGRESS/PROCESSING) — currently running
+  //   3. Pending/Timeout — by FFD queue position
+  const FINISHED = new Set(['DONE', 'FAILED', 'ABANDONED']);
+  const ACTIVE   = new Set(['IN_PROGRESS', 'PROCESSING']);
   list = [...list].sort((a, b) => {
-    const sa = SORT[a.status] ?? 9;
-    const sb = SORT[b.status] ?? 9;
-    if (sa !== sb) return sa - sb;
-    // Within the same status group, sort by FFD queue position
+    const aFin = FINISHED.has(a.status);
+    const bFin = FINISHED.has(b.status);
+    const aAct = ACTIVE.has(a.status);
+    const bAct = ACTIVE.has(b.status);
+
+    // Both finished — most recently completed first
+    if (aFin && bFin) {
+      const aTime = a.completedAt || a.failedAt || a.timedOutAt || 0;
+      const bTime = b.completedAt || b.failedAt || b.timedOutAt || 0;
+      if (bTime > aTime) return  1;
+      if (bTime < aTime) return -1;
+      return a.filename.localeCompare(b.filename);
+    }
+    if (aFin) return -1; // finished before active/pending
+    if (bFin) return  1;
+
+    // Both active — stable order
+    if (aAct && bAct) return a.filename.localeCompare(b.filename);
+    if (aAct) return -1;
+    if (bAct) return  1;
+
+    // Both pending/timeout — by FFD queue position
     const pa = a.queuePosition ?? 999;
     const pb = b.queuePosition ?? 999;
-    return pa - pb;
+    if (pa !== pb) return pa - pb;
+    return a.filename.localeCompare(b.filename);
   });
 
   // Badge count on panel title
