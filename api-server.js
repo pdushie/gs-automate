@@ -19,8 +19,6 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
-const QUEUE_CAPACITY_MB  = 1.5 * 1024 * 1024;               // 1.5 TB — displayed capacity
-const QUEUE_THRESHOLD_MB = QUEUE_CAPACITY_MB - (10 * 1024);  // 1.49 TB — reject when pending exceeds this
 
 
 // ── AUTH ─────────────────────────────────────────────────
@@ -312,48 +310,8 @@ function getFileTotalMBFromBuffer(buffer) {
   }
 }
 
-function balanceInsufficientResponse(res, availableMB) {
-  const availableGB = parseFloat((availableMB / 1024).toFixed(2));
-  console.warn(`🚫 Upload rejected — data balance insufficient: ${availableGB} GB available`);
-  return res.status(503)
-    .set('Retry-After', '300')
-    .json({
-      success: false,
-      error: 'BALANCE_INSUFFICIENT',
-      message: `Data balance is insufficient (${availableGB} GB available). Uploads are paused until a data bundle is purchased or balance is topped up.`,
-      availableDataGB: availableGB,
-    });
-}
 
-function fileExceedsBalanceResponse(res, requiredMB, availableMB) {
-  const requiredGB = parseFloat((requiredMB / 1024).toFixed(2));
-  const availableGB = parseFloat((availableMB / 1024).toFixed(2));
-  console.warn(`🚫 Upload rejected — file allocation (${requiredGB} GB) exceeds available balance (${availableGB} GB)`);
-  return res.status(503)
-    .set('Retry-After', '300')
-    .json({
-      success: false,
-      error: 'BALANCE_INSUFFICIENT',
-      message: `File allocation (${requiredGB} GB) exceeds available balance (${availableGB} GB). Reduce allocation size or wait for balance top-up.`,
-      requiredDataGB: requiredGB,
-      availableDataGB: availableGB,
-    });
-}
 
-function queueFullResponse(res, pendingMB) {
-  const pendingGB = parseFloat((pendingMB / 1024).toFixed(2));
-  const capacityGB = parseFloat((QUEUE_CAPACITY_MB / 1024).toFixed(2));
-  console.warn(`🚫 Queue full — pending: ${pendingGB} GB / capacity: ${capacityGB} GB`);
-  return res.status(503)
-    .set('Retry-After', '300')
-    .json({
-      success: false,
-      error: 'QUEUE_FULL',
-      message: `Upload queue is full (${pendingGB} GB pending of ${capacityGB} GB capacity). Try again after current files have been processed.`,
-      pendingDataGB: pendingGB,
-      capacityGB,
-    });
-}
 
 
 // ── ROUTES ────────────────────────────────────────────────
@@ -470,27 +428,19 @@ app.get('/auth/status', (req, res) => {
 
 
 // POST /upload — accept an Excel file from external app
-app.post('/upload', (req, res, next) => {
-  // Capacity check BEFORE multer writes the file to disk
-  const statusLog = loadStatusLog();
-  const uploadedLog = loadUploadedLog();
-  const availableForCapacity = statusLog._lastBalanceMB || 0;
-  const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog, availableForCapacity);
-  if (pendingMB > QUEUE_THRESHOLD_MB) return queueFullResponse(res, pendingMB);
-  next();
-}, upload.single('file'), (req, res) => {
+app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
 
-  // Check if file allocation exceeds available balance
   const { totalDataGB } = getExcelStats(req.file.path);
   const fileMB = totalDataGB != null ? totalDataGB * 1024 : 0;
   const statusLogNow = loadStatusLog();
   const availableMBNow = statusLogNow._lastBalanceMB || 0;
   if (fileMB > 0 && availableMBNow > 0 && fileMB > availableMBNow) {
-    try { fs.unlinkSync(req.file.path); } catch {}
-    return fileExceedsBalanceResponse(res, fileMB, availableMBNow);
+    const requiredGB = parseFloat((fileMB / 1024).toFixed(2));
+    const availableGB = parseFloat((availableMBNow / 1024).toFixed(2));
+    console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
   }
 
   withFileLock(STATUS_LOG, () => {
@@ -522,17 +472,13 @@ app.post('/upload-base64', (req, res) => {
   try {
     const buffer = Buffer.from(data, 'base64');
 
-    // Balance & capacity checks before saving the file
     const newFileMB = getFileTotalMBFromBuffer(buffer);
     const statusLog = loadStatusLog();
-    const uploadedLog = loadUploadedLog();
     const availableMB = statusLog._lastBalanceMB || 0;
     if (newFileMB > 0 && availableMB > 0 && newFileMB > availableMB) {
-      return fileExceedsBalanceResponse(res, newFileMB, availableMB);
-    }
-    const pendingMB = getPendingQueueTotalMB(statusLog, uploadedLog, availableMB);
-    if (pendingMB + newFileMB > QUEUE_THRESHOLD_MB) {
-      return queueFullResponse(res, pendingMB + newFileMB);
+      const requiredGB = parseFloat((newFileMB / 1024).toFixed(2));
+      const availableGB = parseFloat((availableMB / 1024).toFixed(2));
+      console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
     }
 
     const ext = path.extname(filename);
@@ -593,17 +539,35 @@ function getExcelStats(filePath) {
 // For files that were merged into an NM-merged-* batch, status is derived from
 // the batch record's sourceFiles array. Returns a status-log-style object.
 function resolveFileStatus(filename, uploaded, statusLog) {
-  // 1. Direct flat-key lookup (legacy single-file uploads)
+  // Scan merged batch records first so mergedBatch name is always available,
+  // even when the source file is already in the uploaded log (DONE early-return
+  // previously set mergedBatch: null, hiding the portal-searchable batch name).
+  let mergedBatch = null;
+  let mergedSrcEntry = null;
+  let mergedBatchVal = null;
+  for (const [key, val] of Object.entries(statusLog)) {
+    if (!key.startsWith('NM-merged-') || typeof val !== 'object' || !val.sourceFiles) continue;
+    const srcEntry = val.sourceFiles.find(s => s.filename === filename);
+    if (!srcEntry) continue;
+    mergedBatch = key;
+    mergedSrcEntry = srcEntry;
+    mergedBatchVal = val;
+    break;
+  }
+
+  // 1. File already fully processed — in uploaded log
   if (uploaded.includes(filename)) {
     return {
       status: 'DONE',
       completedAt: statusLog[filename + '_completedAt'] || null,
       queuedAt: statusLog[filename + '_queuedAt'] || null,
-      orderId: statusLog[filename + '_orderId'] || null,
-      orderIds: statusLog[filename + '_orderIds'] || null,
-      mergedBatch: null,
+      orderId: (mergedSrcEntry?.orderId) || statusLog[filename + '_orderId'] || null,
+      orderIds: (mergedSrcEntry?.orderIds) || statusLog[filename + '_orderIds'] || null,
+      mergedBatch,
     };
   }
+
+  // 2. Flat string status key (legacy single-file uploads still in progress)
   if (statusLog[filename] && typeof statusLog[filename] === 'string') {
     return {
       status: statusLog[filename],
@@ -611,26 +575,23 @@ function resolveFileStatus(filename, uploaded, statusLog) {
       queuedAt: statusLog[filename + '_queuedAt'] || null,
       orderId: statusLog[filename + '_orderId'] || null,
       orderIds: statusLog[filename + '_orderIds'] || null,
-      mergedBatch: null,
+      mergedBatch,
     };
   }
 
-  // 2. Scan merged batch records for this source file
-  for (const [key, val] of Object.entries(statusLog)) {
-    if (!key.startsWith('NM-merged-') || typeof val !== 'object' || !val.sourceFiles) continue;
-    const srcEntry = val.sourceFiles.find(s => s.filename === filename);
-    if (!srcEntry) continue;
+  // 3. File is inside an active/pending merged batch
+  if (mergedBatch) {
     return {
-      status: val.status || 'PROCESSING',
-      completedAt: val.completedAt || null,
-      queuedAt: val.createdAt || null,
-      orderId: srcEntry.orderId || null,
-      orderIds: srcEntry.orderIds || null,
-      mergedBatch: key,
+      status: mergedBatchVal.status || 'PROCESSING',
+      completedAt: mergedBatchVal.completedAt || null,
+      queuedAt: mergedBatchVal.createdAt || null,
+      orderId: mergedSrcEntry.orderId || null,
+      orderIds: mergedSrcEntry.orderIds || null,
+      mergedBatch,
     };
   }
 
-  // 3. Default — file received but not yet processed
+  // 4. Default — file received but not yet processed
   return { status: 'PENDING', completedAt: null, queuedAt: null, orderId: null, orderIds: null, mergedBatch: null };
 }
 

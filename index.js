@@ -1391,6 +1391,16 @@ async function run() {
             }
           }
 
+          // ── Fresh balance check right before upload ───────────────────────
+          const { totalMB: freshBalanceMB } = await checkBalance(page, context);
+          console.log(`💰 Pre-upload balance: ${(freshBalanceMB / 1024).toFixed(2)} GB (batch needs ${(batchMB / 1024).toFixed(2)} GB)`);
+          if (batchMB > freshBalanceMB) {
+            console.warn(`⚠️  Balance dropped since scan — batch (${(batchMB / 1024).toFixed(2)} GB) exceeds fresh balance (${(freshBalanceMB / 1024).toFixed(2)} GB). Skipping upload this cycle.`);
+            sendAlert('⚠️ MTN GroupShare — Balance Changed', `Batch of ${(batchMB / 1024).toFixed(2)} GB skipped — fresh balance is only ${(freshBalanceMB / 1024).toFixed(2)} GB.`);
+            await interruptibleSleep(IDLE_REFRESH_INTERVAL);
+            continue;
+          }
+
           // ── Build merged file (or use single file directly if only one fits) ─
           let fileToUpload;
           if (batch.length === 1) {
