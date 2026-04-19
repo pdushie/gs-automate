@@ -270,7 +270,7 @@ function getPendingQueueTotalMB(statusLog, uploadedLog, availableMB = 0) {
   let totalMB = 0;
 
   const files = fs.readdirSync(folderPath)
-    .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
+    .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'));
 
   for (const file of files) {
     if (uploadedLog.includes(file)) continue;
@@ -589,6 +589,51 @@ function getExcelStats(filePath) {
   }
 }
 
+// Resolves the status of a source filename by looking it up in the status log.
+// For files that were merged into an NM-merged-* batch, status is derived from
+// the batch record's sourceFiles array. Returns a status-log-style object.
+function resolveFileStatus(filename, uploaded, statusLog) {
+  // 1. Direct flat-key lookup (legacy single-file uploads)
+  if (uploaded.includes(filename)) {
+    return {
+      status: 'DONE',
+      completedAt: statusLog[filename + '_completedAt'] || null,
+      queuedAt: statusLog[filename + '_queuedAt'] || null,
+      orderId: statusLog[filename + '_orderId'] || null,
+      orderIds: statusLog[filename + '_orderIds'] || null,
+      mergedBatch: null,
+    };
+  }
+  if (statusLog[filename] && typeof statusLog[filename] === 'string') {
+    return {
+      status: statusLog[filename],
+      completedAt: statusLog[filename + '_completedAt'] || null,
+      queuedAt: statusLog[filename + '_queuedAt'] || null,
+      orderId: statusLog[filename + '_orderId'] || null,
+      orderIds: statusLog[filename + '_orderIds'] || null,
+      mergedBatch: null,
+    };
+  }
+
+  // 2. Scan merged batch records for this source file
+  for (const [key, val] of Object.entries(statusLog)) {
+    if (!key.startsWith('NM-merged-') || typeof val !== 'object' || !val.sourceFiles) continue;
+    const srcEntry = val.sourceFiles.find(s => s.filename === filename);
+    if (!srcEntry) continue;
+    return {
+      status: val.status || 'PROCESSING',
+      completedAt: val.completedAt || null,
+      queuedAt: val.createdAt || null,
+      orderId: srcEntry.orderId || null,
+      orderIds: srcEntry.orderIds || null,
+      mergedBatch: key,
+    };
+  }
+
+  // 3. Default — file received but not yet processed
+  return { status: 'PENDING', completedAt: null, queuedAt: null, orderId: null, orderIds: null, mergedBatch: null };
+}
+
 // GET /status — get status of all files
 app.get('/status', (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
@@ -596,19 +641,21 @@ app.get('/status', (req, res) => {
   const statusLog = loadStatusLog();
 
   const allFiles = fs.readdirSync(folderPath)
-    .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'))
+    .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
     .map(f => {
       const stats = getExcelStats(path.join(folderPath, f));
+      const resolved = resolveFileStatus(f, uploaded, statusLog);
       const entry = {
         filename: f,
-        status: uploaded.includes(f) ? 'DONE' : (statusLog[f] || 'PENDING'),
-        queuedAt: statusLog[f + '_queuedAt'] || null,
-        completedAt: statusLog[f + '_completedAt'] || null,
+        status: resolved.status,
+        queuedAt: resolved.queuedAt,
+        completedAt: resolved.completedAt,
         totalDataGB: stats.totalDataGB,
         rowCount: stats.rowCount,
       };
-      if (statusLog[f + '_orderIds']) entry.orderIds = statusLog[f + '_orderIds'];
-      else if (statusLog[f + '_orderId']) entry.orderId = statusLog[f + '_orderId'];
+      if (resolved.orderIds) entry.orderIds = resolved.orderIds;
+      else if (resolved.orderId) entry.orderId = resolved.orderId;
+      if (resolved.mergedBatch) entry.mergedBatch = resolved.mergedBatch;
       return entry;
     });
 
@@ -646,17 +693,19 @@ app.get('/status/:filename', (req, res) => {
   }
 
   const stats = getExcelStats(filePath);
+  const resolved = resolveFileStatus(filename, uploaded, statusLog);
   const entry = {
     success: true,
     filename,
-    status: uploaded.includes(filename) ? 'DONE' : (statusLog[filename] || 'PENDING'),
-    queuedAt: statusLog[filename + '_queuedAt'] || null,
-    completedAt: statusLog[filename + '_completedAt'] || null,
+    status: resolved.status,
+    queuedAt: resolved.queuedAt,
+    completedAt: resolved.completedAt,
     totalDataGB: stats.totalDataGB,
     rowCount: stats.rowCount,
   };
-  if (statusLog[filename + '_orderIds']) entry.orderIds = statusLog[filename + '_orderIds'];
-  else if (statusLog[filename + '_orderId']) entry.orderId = statusLog[filename + '_orderId'];
+  if (resolved.orderIds) entry.orderIds = resolved.orderIds;
+  else if (resolved.orderId) entry.orderId = resolved.orderId;
+  if (resolved.mergedBatch) entry.mergedBatch = resolved.mergedBatch;
   res.json(entry);
 });
 

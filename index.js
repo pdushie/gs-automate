@@ -24,7 +24,7 @@ const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.
 const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
 
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
-const MAX_FILE_RETRIES = 3;
+const MAX_FILE_RETRIES = parseInt(process.env.MAX_FILE_RETRIES || '5');
 
 function loadStatusLog() {
   try {
@@ -86,7 +86,7 @@ function stripTimestamp(filename) {
   return stripped + ext;
 }
 
-async function sendCallback(filename, status, completedAt) {
+async function sendCallback(filename, status, completedAt, orderOverride = null) {
   const orderSystemUrl = process.env.ORDERSYSTEM_URL;
   const secret = process.env.GROUPSHARE_CALLBACK_SECRET;
 
@@ -99,13 +99,21 @@ async function sendCallback(filename, status, completedAt) {
     return;
   }
 
-  // Retrieve stored order reference(s) for this file
-  const statusLog = loadStatusLog();
   const payload = { filename, status, completedAt };
-  if (statusLog[`${filename}_orderIds`]) {
-    payload.orderIds = statusLog[`${filename}_orderIds`];
-  } else if (statusLog[`${filename}_orderId`]) {
-    payload.orderId = statusLog[`${filename}_orderId`];
+
+  // orderOverride is passed directly from a merged batch's sourceFiles entry.
+  // For non-merged (legacy) files, fall back to status log lookup.
+  if (orderOverride && orderOverride.orderIds) {
+    payload.orderIds = orderOverride.orderIds;
+  } else if (orderOverride && orderOverride.orderId) {
+    payload.orderId = orderOverride.orderId;
+  } else {
+    const statusLog = loadStatusLog();
+    if (statusLog[`${filename}_orderIds`]) {
+      payload.orderIds = statusLog[`${filename}_orderIds`];
+    } else if (statusLog[`${filename}_orderId`]) {
+      payload.orderId = statusLog[`${filename}_orderId`];
+    }
   }
 
   const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
@@ -363,6 +371,7 @@ function getPendingFiles(folderPath) {
   const files = fs.readdirSync(folderPath)
     .filter(f => {
       if (!f.endsWith('.xlsx') && !f.endsWith('.xls')) return false;
+      if (f.startsWith('NM-merged-')) return false; // temp merged files — never process as source
       if (uploaded.includes(f)) return false;
       if (statusLog[f] === 'ABANDONED') return false;
       return true;
@@ -742,16 +751,97 @@ function getExcelTotalMB(file) {
   return totalMB;
 }
 
+// ── MERGED FILE BUILDER ───────────────────────────────────────────────────────
+// Accepts an array of file objects (each with .name, .fullPath, .totalMB).
+// Reads each XLSX, concatenates all data rows under a shared header, writes to
+// a temp NM-merged-* file, and records the batch metadata in the status log.
+// Returns the merged file object (same shape as a pendingFiles entry) plus
+// a sourceFiles array for callback tracking.
+function buildMergedFile(files) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const mergedName = `NM-merged-${timestamp}.xlsx`;
+  const mergedPath = path.join(process.env.EXCEL_FOLDER_PATH, mergedName);
+
+  let header = null;
+  let allDataRows = [];
+
+  for (const file of files) {
+    const workbook = XLSX.readFile(file.fullPath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    if (rows.length === 0) continue;
+
+    if (!header) {
+      header = rows[0]; // capture header from first file
+    }
+    // Append data rows (skip header row of each file)
+    for (let r = 1; r < rows.length; r++) {
+      if (rows[r] && rows[r].length > 0) allDataRows.push(rows[r]);
+    }
+  }
+
+  if (!header) throw new Error('buildMergedFile: no data rows found across selected files');
+
+  const mergedSheet = XLSX.utils.aoa_to_sheet([header, ...allDataRows]);
+  const mergedWorkbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(mergedWorkbook, mergedSheet, 'Sheet1');
+  XLSX.writeFile(mergedWorkbook, mergedPath);
+
+  const totalAllocationMB = files.reduce((sum, f) => sum + f.totalMB, 0);
+  console.log(`📎 Merged ${files.length} file(s) → ${mergedName} (${(totalAllocationMB / 1024).toFixed(2)} GB, ${allDataRows.length} rows)`);
+
+  // Load order IDs for each source file from status log
+  const log = loadStatusLog();
+  const sourceFiles = files.map(f => {
+    const entry = { filename: f.name, allocationMB: f.totalMB, callbackSentAt: null };
+    if (log[`${f.name}_orderIds`]) entry.orderIds = log[`${f.name}_orderIds`];
+    else if (log[`${f.name}_orderId`]) entry.orderId = log[`${f.name}_orderId`];
+    return entry;
+  });
+
+  // Record merged batch metadata in status log
+  updateStatusLog({
+    [mergedName]: {
+      status: 'PENDING',
+      createdAt: new Date().toISOString(),
+      totalAllocationMB,
+      sourceFiles,
+      retryCount: 0,
+    },
+  });
+
+  const mergedFile = {
+    name: mergedName,
+    fullPath: mergedPath,
+    totalMB: totalAllocationMB,
+    mtime: fs.statSync(mergedPath).mtime,
+    isMerged: true,
+  };
+
+  return { mergedFile, sourceFiles };
+}
+
 async function uploadFile(page, excelFile) {
   const fileName = path.basename(excelFile.name, path.extname(excelFile.name));
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📦 Uploading: ${excelFile.name}`);
   console.log(`${'='.repeat(60)}`);
 
-  updateStatusLog({
-    [excelFile.name]: 'IN_PROGRESS',
-    [`${excelFile.name}_startedAt`]: new Date().toISOString(),
-  });
+  if (excelFile.isMerged) {
+    withFileLock(STATUS_LOG, () => {
+      const l = loadStatusLog();
+      const rec = l[excelFile.name] || {};
+      rec.status = 'IN_PROGRESS';
+      rec.startedAt = new Date().toISOString();
+      l[excelFile.name] = rec;
+      atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+    });
+  } else {
+    updateStatusLog({
+      [excelFile.name]: 'IN_PROGRESS',
+      [`${excelFile.name}_startedAt`]: new Date().toISOString(),
+    });
+  }
 
   await page.goto('https://up2u.mtn.com.gh/upload/upload-beneficiaries', { waitUntil: 'networkidle' });
 
@@ -765,7 +855,19 @@ async function uploadFile(page, excelFile) {
 
   if (isBlocked) {
     console.warn('⏳ Upload blocked: a previous upload is still processing on MTN\'s end. Will retry later.');
-    updateStatusLog({ [excelFile.name]: 'PENDING' });
+    if (excelFile.isMerged) {
+      withFileLock(STATUS_LOG, () => {
+        const l = loadStatusLog();
+        const rec = l[excelFile.name] || {};
+        rec.status = 'PENDING';
+        l[excelFile.name] = rec;
+        atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+      });
+      // Delete temp merged file — source files stay pending and will be re-merged next cycle
+      try { fs.unlinkSync(excelFile.fullPath); } catch {}
+    } else {
+      updateStatusLog({ [excelFile.name]: 'PENDING' });
+    }
     return { blocked: true };
   }
 
@@ -798,7 +900,9 @@ async function uploadFile(page, excelFile) {
 
     await statusNavPromise;
     console.log('✅ Status page loaded — polling for DONE...');
-    updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
+    if (!excelFile.isMerged) {
+      updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
+    }
   } catch (navErr) {
     console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
     await page.screenshot({ path: `nav-error-${fileName}.png` });
@@ -818,14 +922,34 @@ async function uploadFile(page, excelFile) {
       const isDuplicateGroup = /already exists|duplicate|group name.*taken|already been (uploaded|shared)/i.test(portalError);
       if (isDuplicateGroup) {
         const completedAt = new Date().toISOString();
-        markAsUploaded(excelFile.name);
-        updateStatusLog({
-          [excelFile.name]: 'DONE',
-          [`${excelFile.name}_completedAt`]: completedAt,
-          [`${excelFile.name}_note`]: `Marked done — portal rejected upload (duplicate group name). Portal message: ${portalError}`,
-        });
+        if (excelFile.isMerged) {
+          withFileLock(STATUS_LOG, () => {
+            const l = loadStatusLog();
+            const rec = l[excelFile.name] || {};
+            rec.status = 'DONE';
+            rec.completedAt = completedAt;
+            rec.note = `Marked done — duplicate group name. Portal: ${portalError}`;
+            l[excelFile.name] = rec;
+            atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+          });
+          const srcFiles = (loadStatusLog()[excelFile.name]?.sourceFiles || []);
+          for (const src of srcFiles) {
+            await sendCallback(src.filename, 'DONE', completedAt, src);
+            updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
+            markAsUploaded(src.filename);
+          }
+          try { fs.unlinkSync(excelFile.fullPath); } catch {}
+          markAsUploaded(excelFile.name);
+        } else {
+          markAsUploaded(excelFile.name);
+          updateStatusLog({
+            [excelFile.name]: 'DONE',
+            [`${excelFile.name}_completedAt`]: completedAt,
+            [`${excelFile.name}_note`]: `Marked done — portal rejected upload (duplicate group name). Portal message: ${portalError}`,
+          });
+          await sendCallback(excelFile.name, 'DONE', completedAt);
+        }
         console.log(`✅ ${excelFile.name} — marked as DONE (duplicate group name confirmed)`);
-        await sendCallback(excelFile.name, 'DONE', completedAt);
         return true;
       }
 
@@ -836,30 +960,74 @@ async function uploadFile(page, excelFile) {
 
     // Genuine navigation failure — apply retry / abandon logic
     const currentStatus = loadStatusLog();
-    const retryCount = (currentStatus[`${excelFile.name}_retryCount`] || 0) + 1;
+    const existingNavRetry = excelFile.isMerged
+      ? (currentStatus[excelFile.name]?.retryCount || 0)
+      : (currentStatus[`${excelFile.name}_retryCount`] || 0);
+    const retryCount = existingNavRetry + 1;
+    const timedOutAt = new Date().toISOString();
 
     if (retryCount >= MAX_FILE_RETRIES) {
-      updateStatusLog({
-        [excelFile.name]: 'ABANDONED',
-        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
-        [`${excelFile.name}_retryCount`]: retryCount,
-      });
-      sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+      if (excelFile.isMerged) {
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'ABANDONED';
+          rec.timedOutAt = timedOutAt;
+          rec.retryCount = retryCount;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
+        sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" failed navigation ${retryCount} times. Source files re-queued: ${srcNames}`);
+      } else {
+        updateStatusLog({
+          [excelFile.name]: 'ABANDONED',
+          [`${excelFile.name}_timedOutAt`]: timedOutAt,
+          [`${excelFile.name}_retryCount`]: retryCount,
+        });
+        sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+        await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+      }
       console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
-      await sendCallback(excelFile.name, 'ABANDONED', new Date().toISOString());
     } else {
-      updateStatusLog({
-        [excelFile.name]: 'TIMEOUT',
-        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
-        [`${excelFile.name}_retryCount`]: retryCount,
-      });
-      sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+      if (excelFile.isMerged) {
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'TIMEOUT';
+          rec.timedOutAt = timedOutAt;
+          rec.retryCount = retryCount;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-merged automatically.`);
+      } else {
+        updateStatusLog({
+          [excelFile.name]: 'TIMEOUT',
+          [`${excelFile.name}_timedOutAt`]: timedOutAt,
+          [`${excelFile.name}_retryCount`]: retryCount,
+        });
+        sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+      }
       console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), will retry`);
     }
     return { error: true };
   }
 
-  updateStatusLog({ [excelFile.name]: 'PROCESSING' });
+  if (excelFile.isMerged) {
+    withFileLock(STATUS_LOG, () => {
+      const l = loadStatusLog();
+      const rec = l[excelFile.name] || {};
+      rec.status = 'PROCESSING';
+      rec.queuedAt = new Date().toISOString();
+      l[excelFile.name] = rec;
+      atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+    });
+  } else {
+    updateStatusLog({ [excelFile.name]: 'PROCESSING' });
+  }
 
   const maxAttempts = 70;
   const pollInterval = 20000;
@@ -892,29 +1060,87 @@ async function uploadFile(page, excelFile) {
     if (status === 'DONE') {
       isDone = true;
       const completedAt = new Date().toISOString();
-      markAsUploaded(excelFile.name);
 
-      updateStatusLog({
-        [excelFile.name]: 'DONE',
-        [`${excelFile.name}_completedAt`]: completedAt,
-      });
+      if (excelFile.isMerged) {
+        // ── Merged batch: callback each source file individually ──────────
+        const log = loadStatusLog();
+        const batchRecord = log[excelFile.name] || {};
+        const sourceFiles = batchRecord.sourceFiles || [];
+
+        // Update merged batch record status
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'DONE';
+          rec.completedAt = completedAt;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+
+        for (let si = 0; si < sourceFiles.length; si++) {
+          const src = sourceFiles[si];
+          if (src.callbackSentAt) {
+            console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping`);
+          } else {
+            await sendCallback(src.filename, 'DONE', completedAt, src);
+            // Mark callbackSentAt in the merged batch record
+            withFileLock(STATUS_LOG, () => {
+              const l = loadStatusLog();
+              const rec = l[excelFile.name] || {};
+              if (rec.sourceFiles && rec.sourceFiles[si]) {
+                rec.sourceFiles[si].callbackSentAt = new Date().toISOString();
+              }
+              l[excelFile.name] = rec;
+              atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+            });
+          }
+          // Write flat _completedAt so resolveFileStatus and cleanupOldFiles
+          // can find the timestamp via the standard key without scanning batch records
+          updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
+          markAsUploaded(src.filename);
+        }
+
+        // Delete the temp merged file
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        markAsUploaded(excelFile.name);
+      } else {
+        // ── Single file (legacy path) ─────────────────────────────────────
+        markAsUploaded(excelFile.name);
+        updateStatusLog({
+          [excelFile.name]: 'DONE',
+          [`${excelFile.name}_completedAt`]: completedAt,
+        });
+        await sendCallback(excelFile.name, 'DONE', completedAt);
+      }
 
       await page.screenshot({ path: `done-${fileName}.png` });
       console.log(`🎉 ${excelFile.name} — DONE!`);
-      await sendCallback(excelFile.name, 'DONE', completedAt);
       break;
     }
 
     if (status && /fail/i.test(status)) {
       isFailed = true;
-      updateStatusLog({
-        [excelFile.name]: 'FAILED',
-        [`${excelFile.name}_failedAt`]: new Date().toISOString(),
-      });
-      sendAlert(
-        '❌ MTN GroupShare — Upload Failed',
-        `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`
-      );
+      const failedAt = new Date().toISOString();
+      if (excelFile.isMerged) {
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'FAILED';
+          rec.failedAt = failedAt;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+        // Delete temp file — source files remain pending for next bin-pack cycle
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
+        sendAlert('❌ MTN GroupShare — Merged Upload Failed', `Batch "${excelFile.name}" FAILED on MTN's end. Source files re-queued: ${srcNames}`);
+      } else {
+        updateStatusLog({
+          [excelFile.name]: 'FAILED',
+          [`${excelFile.name}_failedAt`]: failedAt,
+        });
+        sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
+      }
       await page.screenshot({ path: `failed-${fileName}.png` });
       console.error(`❌ ${excelFile.name} — FAILED on MTN's end`);
       break;
@@ -925,32 +1151,61 @@ async function uploadFile(page, excelFile) {
 
   if (!isDone && !isFailed) {
     const currentStatus = loadStatusLog();
-    const retryCount = (currentStatus[`${excelFile.name}_retryCount`] || 0) + 1;
+    const existingRetry = excelFile.isMerged
+      ? (currentStatus[excelFile.name]?.retryCount || 0)
+      : (currentStatus[`${excelFile.name}_retryCount`] || 0);
+    const retryCount = existingRetry + 1;
+    const timedOutAt = new Date().toISOString();
 
     if (retryCount >= MAX_FILE_RETRIES) {
-      updateStatusLog({
-        [excelFile.name]: 'ABANDONED',
-        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
-        [`${excelFile.name}_retryCount`]: retryCount,
-      });
+      if (excelFile.isMerged) {
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'ABANDONED';
+          rec.timedOutAt = timedOutAt;
+          rec.retryCount = retryCount;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+        // Delete temp merged file — source files stay pending so they re-enter next cycle
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
+        sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" abandoned after ${retryCount} timeouts. Source files re-queued: ${srcNames}`);
+      } else {
+        updateStatusLog({
+          [excelFile.name]: 'ABANDONED',
+          [`${excelFile.name}_timedOutAt`]: timedOutAt,
+          [`${excelFile.name}_retryCount`]: retryCount,
+        });
+        sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
+        await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+      }
       console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} timeout(s)`);
-      sendAlert(
-        '🚫 MTN GroupShare — File Abandoned',
-        `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`
-      );
       await page.screenshot({ path: `abandoned-${fileName}.png` });
-      await sendCallback(excelFile.name, 'ABANDONED', new Date().toISOString());
     } else {
-      updateStatusLog({
-        [excelFile.name]: 'TIMEOUT',
-        [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
-        [`${excelFile.name}_retryCount`]: retryCount,
-      });
+      if (excelFile.isMerged) {
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          rec.status = 'TIMEOUT';
+          rec.timedOutAt = timedOutAt;
+          rec.retryCount = retryCount;
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+        // Delete temp merged file — will be rebuilt on next cycle
+        try { fs.unlinkSync(excelFile.fullPath); } catch {}
+        sendAlert('⚠️ MTN GroupShare — Merged Batch Timeout', `Batch "${excelFile.name}" timed out (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-merged automatically.`);
+      } else {
+        updateStatusLog({
+          [excelFile.name]: 'TIMEOUT',
+          [`${excelFile.name}_timedOutAt`]: timedOutAt,
+          [`${excelFile.name}_retryCount`]: retryCount,
+        });
+        sendAlert('⚠️ MTN GroupShare — Processing Timeout', `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+      }
       console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — will retry next run`);
-      sendAlert(
-        '⚠️ MTN GroupShare — Processing Timeout',
-        `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`
-      );
       await page.screenshot({ path: `timeout-${fileName}.png` });
     }
   }
@@ -1094,79 +1349,73 @@ async function run() {
       let anyFileUploaded = false;
       let skippedDueToBalance = 0;
       let autoPurchaseTriggered = false;
-      // Track allocations confirmed DONE but not yet reflected in the MTN API balance
-      // (MTN takes time to apply deductions after a successful upload)
-      let pendingDeductionMB = 0;
 
-      for (let i = 0; i < pendingFiles.length; i++) {
+      // ── Fetch effective balance once for this scan cycle ─────────────────
+      const { totalMB: apiBalanceMB } = await checkBalance(page, context);
+      const availableMB = apiBalanceMB;
 
-        // ── Step 1: Fetch real balance before each file (API is instant, no navigation needed) ──
-        // Subtract any in-flight allocations not yet reflected in the MTN API
-        const { totalMB: apiBalanceMB } = await checkBalance(page, context);
-        const availableMB = Math.max(0, apiBalanceMB - pendingDeductionMB);
-        if (pendingDeductionMB > 0) {
-          console.log(`💰 Effective balance: ${(availableMB / 1024).toFixed(2)} GB (API: ${(apiBalanceMB / 1024).toFixed(2)} GB, pending deduction: ${(pendingDeductionMB / 1024).toFixed(2)} GB — MTN processing lag)`);
-        }
+      // ── Check balance threshold before building batch ─────────────────────
+      const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
+      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS') {
+        console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next batch...`);
+        sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+        updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+        autoPurchaseTriggered = true;
+      }
 
-        // ── Step 2: Check if balance is ≤ 90 GB before attempting next file ──
-        const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
-        if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS') {
-          console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next file...`);
-          sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
-          updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
-          autoPurchaseTriggered = true;
-          break;
-        }
-
-        console.log(`\n📌 File ${i + 1} of ${pendingFiles.length}: ${pendingFiles[i].name}`);
-
-        if (!await isSessionActive(page)) {
-          console.log('🔒 Session lost before upload — re-logging in...');
-          try {
-            await login(page);
-          } catch (loginErr) {
-            console.warn(`⚠️  Login failed before upload (portal may be down): ${loginErr.message}`);
-            console.log('⏳ Waiting 5 minutes before retrying...');
-            sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed before upload. Will retry in 5 minutes.');
-            await new Promise(r => setTimeout(r, 5 * 60 * 1000));
-            break;
+      if (!autoPurchaseTriggered) {
+        // ── Bin-pack: greedily select files whose combined total fits balance ─
+        const batch = [];
+        let batchMB = 0;
+        for (const f of pendingFiles) {
+          if (batchMB + f.totalMB <= availableMB) {
+            batch.push(f);
+            batchMB += f.totalMB;
+          } else {
+            skippedDueToBalance++;
           }
         }
 
-        // ── Step 3: Check if this file fits the current balance ──
-        const requiredMB = pendingFiles[i].totalMB; // already computed above
-        console.log(`💰 Available : ${availableMB.toFixed(2)} MB (${(availableMB / 1024).toFixed(2)} GB)`);
-        console.log(`📊 Required  : ${requiredMB.toFixed(2)} MB (${(requiredMB / 1024).toFixed(2)} GB)`);
+        if (batch.length === 0) {
+          skippedDueToBalance = pendingFiles.length;
+        } else {
+          if (!await isSessionActive(page)) {
+            console.log('🔒 Session lost before upload — re-logging in...');
+            try {
+              await login(page);
+            } catch (loginErr) {
+              console.warn(`⚠️  Login failed before upload (portal may be down): ${loginErr.message}`);
+              sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed before upload. Will retry in 5 minutes.');
+              await new Promise(r => setTimeout(r, 5 * 60 * 1000));
+              continue;
+            }
+          }
 
-        if (requiredMB > availableMB) {
-          const shortfall = (requiredMB - availableMB).toFixed(2);
-          console.warn(`⚠️  "${pendingFiles[i].name}" requires more data than available (shortfall: ${shortfall} MB) — skipping, checking remaining files...`);
-          skippedDueToBalance++;
-          continue;
-        }
+          // ── Build merged file (or use single file directly if only one fits) ─
+          let fileToUpload;
+          if (batch.length === 1) {
+            fileToUpload = batch[0];
+            console.log(`\n📌 Single file batch — uploading directly: ${fileToUpload.name}`);
+          } else {
+            console.log(`\n📎 Merging ${batch.length} file(s) into one batch (${(batchMB / 1024).toFixed(2)} GB total):`);
+            batch.forEach((f, idx) => console.log(`   ${idx + 1}. ${f.name} — ${(f.totalMB / 1024).toFixed(2)} GB`));
+            const { mergedFile } = buildMergedFile(batch);
+            fileToUpload = mergedFile;
+          }
 
-        // ── Step 4: Upload ──
-        console.log(`✅ Balance sufficient — proceeding...`);
-        const uploadResult = await uploadFile(page, pendingFiles[i]);
-        if (uploadResult && uploadResult.blocked) {
-          console.warn('⏳ MTN is still processing a previous upload. Stopping batch — will retry all pending files next scan.');
-          break;
-        }
-        if (uploadResult && uploadResult.error) {
-          console.warn('⚠️ Upload navigation error — skipping to next file.');
-          continue;
-        }
+          const uploadResult = await uploadFile(page, fileToUpload);
 
-        // ── Step 5: Post-upload handling ──
-        if (uploadResult !== true) {
-          console.warn(`⚠️ Upload of "${pendingFiles[i].name}" did not confirm DONE — skipping to next file.`);
-          continue;
+          if (uploadResult && uploadResult.blocked) {
+            console.warn('⏳ MTN is still processing a previous upload. Stopping batch — will retry all pending files next scan.');
+          } else if (uploadResult && uploadResult.error) {
+            console.warn('⚠️ Upload navigation error — will retry next scan.');
+          } else if (uploadResult === true) {
+            anyFileUploaded = true;
+            updateStatusLog({ _balanceInsufficient: false });
+          } else {
+            console.warn(`⚠️ Upload did not confirm DONE — will retry next scan.`);
+          }
         }
-        anyFileUploaded = true;
-        // Clear insufficient flag since we just successfully uploaded
-        updateStatusLog({ _balanceInsufficient: false });
-        // Accumulate the in-flight deduction — MTN API balance lags behind actual allocation
-        pendingDeductionMB += requiredMB;
       }
 
       // Running balance hit ≤ 90 GB — purchase now then re-scan
