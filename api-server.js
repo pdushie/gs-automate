@@ -859,10 +859,9 @@ app.get('/summary', requireAuth, (req, res) => {
   let files;
   try {
     files = fs.readdirSync(folderPath)
-      .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'))
+      .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
       .map(f => {
-        const isUploaded = uploaded.includes(f);
-        const status     = isUploaded ? 'DONE' : (statusLog[f] || 'PENDING');
+        const resolved   = resolveFileStatus(f, uploaded, statusLog);
         const cachedMB   = statusLog[`${f}_totalMB`];
         const totalDataGB = cachedMB != null
           ? parseFloat((cachedMB / 1024).toFixed(4))
@@ -870,18 +869,19 @@ app.get('/summary', requireAuth, (req, res) => {
 
         const entry = {
           filename:    f,
-          status,
+          status:      resolved.status,
           totalDataGB,
-          queuedAt:    statusLog[`${f}_queuedAt`]    || null,
-          startedAt:   statusLog[`${f}_startedAt`]   || null,
-          completedAt: statusLog[`${f}_completedAt`] || null,
-          failedAt:    statusLog[`${f}_failedAt`]    || null,
-          timedOutAt:  statusLog[`${f}_timedOutAt`]  || null,
-          retryCount:  statusLog[`${f}_retryCount`]  || 0,
+          queuedAt:    resolved.queuedAt   || null,
+          startedAt:   statusLog[`${f}_startedAt`]  || null,
+          completedAt: resolved.completedAt || null,
+          failedAt:    statusLog[`${f}_failedAt`]   || null,
+          timedOutAt:  statusLog[`${f}_timedOutAt`] || null,
+          retryCount:  statusLog[`${f}_retryCount`] || 0,
+          mergedBatch: resolved.mergedBatch || null,
         };
 
-        if (statusLog[`${f}_orderIds`])     entry.orderIds = statusLog[`${f}_orderIds`];
-        else if (statusLog[`${f}_orderId`]) entry.orderId  = statusLog[`${f}_orderId`];
+        if (resolved.orderIds)     entry.orderIds = resolved.orderIds;
+        else if (resolved.orderId) entry.orderId  = resolved.orderId;
 
         return entry;
       });

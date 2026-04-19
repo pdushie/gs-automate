@@ -983,9 +983,9 @@ function applyView() {
   }
 
   // Sort:
-  //   1. Finished (DONE/FAILED/ABANDONED) — most recently completed first, at the TOP
-  //   2. Active (IN_PROGRESS/PROCESSING) — currently running
-  //   3. Pending/Timeout — by FFD queue position
+  //   1. Active (IN_PROGRESS/PROCESSING) — currently uploading
+  //   2. Pending/Timeout — by FFD queue position (#1, #2, #3…)
+  //   3. Finished (DONE/FAILED/ABANDONED) — most recently completed first
   const FINISHED = new Set(['DONE', 'FAILED', 'ABANDONED']);
   const ACTIVE   = new Set(['IN_PROGRESS', 'PROCESSING']);
   list = [...list].sort((a, b) => {
@@ -1002,8 +1002,8 @@ function applyView() {
       if (bTime < aTime) return -1;
       return a.filename.localeCompare(b.filename);
     }
-    if (aFin) return -1; // finished before active/pending
-    if (bFin) return  1;
+    if (aFin) return  1; // finished sinks below pending/active
+    if (bFin) return -1;
 
     // Both active — stable order
     if (aAct && bAct) return a.filename.localeCompare(b.filename);
