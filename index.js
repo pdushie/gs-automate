@@ -790,12 +790,32 @@ function buildMergedFile(files) {
   const totalAllocationMB = files.reduce((sum, f) => sum + f.totalMB, 0);
   console.log(`📎 Merged ${files.length} file(s) → ${mergedName} (${(totalAllocationMB / 1024).toFixed(2)} GB, ${allDataRows.length} rows)`);
 
-  // Load order IDs for each source file from status log
+  // Load order IDs for each source file from status log.
+  // Flat keys (_orderId/_orderIds) are set at upload time. If a file was
+  // previously merged and its order IDs only exist inside an older batch
+  // record's sourceFiles[], scan those records as a fallback so callbacks
+  // on retry attempts always include the correct order references.
   const log = loadStatusLog();
   const sourceFiles = files.map(f => {
     const entry = { filename: f.name, allocationMB: f.totalMB, callbackSentAt: null };
-    if (log[`${f.name}_orderIds`]) entry.orderIds = log[`${f.name}_orderIds`];
-    else if (log[`${f.name}_orderId`]) entry.orderId = log[`${f.name}_orderId`];
+    if (log[`${f.name}_orderIds`]) {
+      entry.orderIds = log[`${f.name}_orderIds`];
+    } else if (log[`${f.name}_orderId`]) {
+      entry.orderId = log[`${f.name}_orderId`];
+    } else {
+      // Fallback: scan all previous merged batch records for this source file
+      let bestCreatedAt = null;
+      for (const [, val] of Object.entries(log)) {
+        if (typeof val !== 'object' || !val.sourceFiles || !val.createdAt) continue;
+        const prev = val.sourceFiles.find(s => s.filename === f.name);
+        if (!prev) continue;
+        if (!bestCreatedAt || val.createdAt > bestCreatedAt) {
+          bestCreatedAt = val.createdAt;
+          if (prev.orderIds) { entry.orderIds = prev.orderIds; delete entry.orderId; }
+          else if (prev.orderId) { entry.orderId = prev.orderId; delete entry.orderIds; }
+        }
+      }
+    }
     return entry;
   });
 

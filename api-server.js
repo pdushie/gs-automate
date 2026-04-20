@@ -539,9 +539,11 @@ function getExcelStats(filePath) {
 // For files that were merged into an NM-merged-* batch, status is derived from
 // the batch record's sourceFiles array. Returns a status-log-style object.
 function resolveFileStatus(filename, uploaded, statusLog) {
-  // Scan merged batch records first so mergedBatch name is always available,
-  // even when the source file is already in the uploaded log (DONE early-return
-  // previously set mergedBatch: null, hiding the portal-searchable batch name).
+  // Scan ALL merged batch records that contain this source file.
+  // A file can appear in multiple batch records when a previous batch timed out
+  // and the source files were re-merged into a new batch. Always use the most
+  // recently created batch record so stale TIMEOUT/FAILED records from earlier
+  // attempts don't shadow the current IN_PROGRESS/DONE status.
   let mergedBatch = null;
   let mergedSrcEntry = null;
   let mergedBatchVal = null;
@@ -549,10 +551,12 @@ function resolveFileStatus(filename, uploaded, statusLog) {
     if (!key.startsWith('NM-merged-') || typeof val !== 'object' || !val.sourceFiles) continue;
     const srcEntry = val.sourceFiles.find(s => s.filename === filename);
     if (!srcEntry) continue;
-    mergedBatch = key;
-    mergedSrcEntry = srcEntry;
-    mergedBatchVal = val;
-    break;
+    // Prefer the most recently created batch record
+    if (!mergedBatch || (val.createdAt && (!mergedBatchVal.createdAt || val.createdAt > mergedBatchVal.createdAt))) {
+      mergedBatch = key;
+      mergedSrcEntry = srcEntry;
+      mergedBatchVal = val;
+    }
   }
 
   // 1. File already fully processed — in uploaded log
