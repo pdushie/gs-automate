@@ -1216,6 +1216,15 @@ async function uploadFile(page, excelFile) {
 async function run() {
   await startServer();
 
+  // Reset any purchase status that got stuck as IN_PROGRESS from a previous
+  // session that was killed mid-purchase. On a fresh start there is no active
+  // purchase, so IN_PROGRESS is always stale.
+  const stuckPurchaseStatus = loadStatusLog()._purchaseStatus;
+  if (stuckPurchaseStatus === 'IN_PROGRESS') {
+    console.warn('⚠️  Resetting stale _purchaseStatus IN_PROGRESS → FAILED on startup');
+    updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: 'Reset on restart — previous purchase session interrupted' });
+  }
+
   const browser = await chromium.launch({
     headless: process.env.NODE_ENV === 'production',
     slowMo: process.env.NODE_ENV === 'production' ? 0 : 300,
@@ -1447,16 +1456,21 @@ async function run() {
 
       // All pending files were too large — none fit the available balance
       if (!anyFileUploaded && skippedDueToBalance > 0) {
-        const availableGB = ((loadStatusLog()._lastBalanceMB || 0) / 1024).toFixed(2);
+        const latestBalanceMB = loadStatusLog()._lastBalanceMB || 0;
+        const availableGB = (latestBalanceMB / 1024).toFixed(2);
         updateStatusLog({ _balanceInsufficient: true });
 
-        // Cannot trigger a purchase here — MTN only allows purchase when balance < 90 GB.
-        // The only way to unblock is for the sender to submit smaller files that consume
-        // the balance until it drops below 90 GB, which will trigger an auto-purchase.
-        const msg = `All ${skippedDueToBalance} pending file(s) exceed available balance (${availableGB} GB). `
-          + `Send files with total allocation ≤ ${availableGB} GB to drain balance below 90 GB and trigger an auto-purchase.`;
-        console.warn(`⚠️  ${msg}`);
-        sendAlert('⚠️ MTN GroupShare — Queue Blocked', msg);
+        if (latestBalanceMB <= AUTO_PURCHASE_THRESHOLD_MB) {
+          // Balance is below purchase threshold but purchase didn't trigger — status log
+          // may be stuck. Force a reset so next cycle re-triggers the purchase.
+          console.warn(`⚠️  Balance (${availableGB} GB) is below 90 GB but auto-purchase did not trigger — resetting purchase status for next cycle.`);
+          updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: 'Force-reset — balance below threshold but purchase blocked by stale status' });
+        } else {
+          const msg = `All ${skippedDueToBalance} pending file(s) exceed available balance (${availableGB} GB). `
+            + `Send files with total allocation ≤ ${availableGB} GB to drain balance below 90 GB and trigger an auto-purchase.`;
+          console.warn(`⚠️  ${msg}`);
+          sendAlert('⚠️ MTN GroupShare — Queue Blocked', msg);
+        }
       }
 
       console.log(`\n⏳ Batch complete. Next scan in 1 min...`);
