@@ -946,17 +946,10 @@ app.post('/retry-callback', async (req, res) => {
 
 
 // GET /health — simple health check
+// GET /health — fast liveness probe for Render / uptime monitors.
+// Must respond in well under 5 s — deliberately does NO disk I/O.
 app.get('/health', (req, res) => {
-  const usage = getDiskUsage();
-  res.json({
-    success: true,
-    status: 'running',
-    time: new Date().toISOString(),
-    disk: {
-      usedMB: usage.totalMB,
-      fileCount: usage.fileCount,
-    },
-  });
+  res.json({ success: true, status: 'running', time: new Date().toISOString() });
 });
 
 
