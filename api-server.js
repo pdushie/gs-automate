@@ -833,6 +833,118 @@ app.post('/cleanup', (req, res) => {
 });
 
 
+// POST /retry-callback — manually re-fire a callback for a stuck/old order.
+// Body: { filename, status?, completedAt?, orderId?, orderIds?, markLocalDone? }
+// - orderId/orderIds override the status-log lookup.
+// - markLocalDone (default true): also updates the local status log + uploaded list
+//   so the bot stops treating the file as active/pending.
+app.post('/retry-callback', async (req, res) => {
+  const { filename, status, completedAt, orderId, orderIds } = req.body || {};
+  const markLocalDone = req.body.markLocalDone !== false; // default true
+
+  if (!filename || typeof filename !== 'string') {
+    return res.status(400).json({ success: false, error: 'filename is required' });
+  }
+
+  const orderSystemUrl = process.env.ORDERSYSTEM_URL;
+  const secret = process.env.GROUPSHARE_CALLBACK_SECRET;
+
+  if (!orderSystemUrl) return res.status(500).json({ success: false, error: 'ORDERSYSTEM_URL not configured' });
+  if (!secret)         return res.status(500).json({ success: false, error: 'GROUPSHARE_CALLBACK_SECRET not configured' });
+
+  const statusLog = loadStatusLog();
+
+  // Resolve order IDs: body override → flat status-log keys → scan merged batch records
+  let resolvedOrderIds = orderIds || null;
+  let resolvedOrderId  = orderId  || null;
+
+  if (!resolvedOrderIds && !resolvedOrderId) {
+    if (statusLog[`${filename}_orderIds`]) {
+      resolvedOrderIds = statusLog[`${filename}_orderIds`];
+    } else if (statusLog[`${filename}_orderId`]) {
+      resolvedOrderId = statusLog[`${filename}_orderId`];
+    } else {
+      // Scan merged batch records (covers the old bug where flat keys were missing)
+      for (const [key, val] of Object.entries(statusLog)) {
+        if (!key.startsWith('NM-merged-') || typeof val !== 'object' || !val.sourceFiles) continue;
+        const src = val.sourceFiles.find(s => s.filename === filename);
+        if (src) {
+          if (src.orderIds) { resolvedOrderIds = src.orderIds; break; }
+          if (src.orderId)  { resolvedOrderId  = src.orderId;  break; }
+        }
+      }
+    }
+  }
+
+  const resolvedStatus      = (status && typeof status === 'string') ? status : 'DONE';
+  const resolvedCompletedAt = (completedAt && typeof completedAt === 'string')
+    ? completedAt
+    : (statusLog[`${filename}_completedAt`] || new Date().toISOString());
+
+  const payload = { filename, status: resolvedStatus, completedAt: resolvedCompletedAt };
+  if (resolvedOrderIds) payload.orderIds = resolvedOrderIds;
+  else if (resolvedOrderId) payload.orderId = resolvedOrderId;
+
+  const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
+
+  console.log(`📡 Manual retry-callback for "${filename}" (${resolvedStatus}) — orderIds: ${JSON.stringify(resolvedOrderIds ?? resolvedOrderId ?? null)}`);
+
+  let callbackResult;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const text = await response.text().catch(() => '');
+    if (response.ok) {
+      console.log(`📤 retry-callback sent for "${filename}" — HTTP ${response.status}`);
+      callbackResult = { success: true, httpStatus: response.status };
+    } else {
+      console.warn(`⚠️  retry-callback for "${filename}" returned HTTP ${response.status}: ${text}`);
+      return res.status(502).json({ success: false, httpStatus: response.status, body: text, payload });
+    }
+  } catch (err) {
+    console.error(`❌ retry-callback failed for "${filename}": ${err.message}`);
+    return res.status(502).json({ success: false, error: err.message, payload });
+  }
+
+  // Optionally mark the file as done in the local status log + uploaded list.
+  // This stops the bot from treating the file as active/pending on next cycle.
+  let localUpdated = false;
+  if (markLocalDone) {
+    try {
+      withFileLock(STATUS_LOG, () => {
+        const l = loadStatusLog();
+        // Flat status key — covers both standalone files and merged-batch source files
+        l[filename] = resolvedStatus;
+        l[`${filename}_completedAt`] = resolvedCompletedAt;
+        // If this filename IS the merged batch record itself, update its object status too
+        if (typeof l[filename] === 'object') {
+          l[filename].status      = resolvedStatus;
+          l[filename].completedAt = resolvedCompletedAt;
+        }
+        atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+      });
+      // Add to uploaded list so the bot skips it on the next scan
+      withFileLock(UPLOADED_LOG, () => {
+        const uploaded = loadUploadedLog();
+        if (!uploaded.includes(filename)) {
+          uploaded.push(filename);
+          atomicWrite(UPLOADED_LOG, JSON.stringify(uploaded, null, 2));
+        }
+      });
+      localUpdated = true;
+      console.log(`📝 Local status for "${filename}" updated to ${resolvedStatus} and added to uploaded list`);
+    } catch (err) {
+      console.warn(`⚠️  retry-callback: failed to update local status for "${filename}": ${err.message}`);
+    }
+  }
+
+  return res.json({ ...callbackResult, localUpdated, payload });
+});
+
+
 // GET /health — simple health check
 app.get('/health', (req, res) => {
   const usage = getDiskUsage();
