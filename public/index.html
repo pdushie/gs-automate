@@ -1285,6 +1285,12 @@ async function doRefresh() {
   }
 }
 
+/* ── Progress bar ────────────────────────── */
+function setProgressBar(fraction) {
+  const bar = document.getElementById('refreshBar');
+  if (bar) bar.style.width = (Math.max(0, Math.min(1, fraction)) * 100) + '%';
+}
+
 /* ── Countdown ───────────────────────────── */
 function startCountdown() {
   clearInterval(cdTimer);

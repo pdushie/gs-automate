@@ -40,7 +40,7 @@ const _sessionStore = new Map(); // token     -> expiresAt
 const _rateStore    = new Map(); // ip        -> timestamps[]
 
 const OTP_TTL_MS     =  5 * 60 * 1000;      // 5 minutes
-const SESSION_TTL_MS =  8 * 60 * 60 * 1000; // 8 hours
+const SESSION_TTL_MS = 30 * 60 * 1000;      // 30 minutes
 const RATE_MAX       = 3;
 const RATE_WIN_MS    = 15 * 60 * 1000;      // 15 minutes
 
