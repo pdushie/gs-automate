@@ -7,12 +7,17 @@ const XLSX = require('xlsx');
 require('dotenv').config();
 const { withFileLock, atomicWrite } = require('./lock');
 const crypto      = require('crypto');
+const compression = require('compression');
 const TelegramBot = require('node-telegram-bot-api');
 
 
 const app = express();
+app.use(compression()); // gzip all JSON + HTML responses
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+// Capture raw body buffer for routes that need it (e.g. HMAC verification on /evd/callback).
+// Must be set on express.json() before the body is parsed — route-level express.raw() does NOT
+// work because the global parser consumes the stream first.
+app.use(express.json({ limit: '50mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 
@@ -116,34 +121,50 @@ const upload = multer({
 
 // ── HELPERS ───────────────────────────────────────────────
 
+// In-process read caches — reduce disk I/O for hot read paths.
+// The bot writes directly to disk via atomicWrite; these caches use a short
+// TTL so API reads stay fresh without hitting the filesystem on every request.
+const _cache = {
+  statusLog:   { data: null, at: 0 },
+  uploadedLog: { data: null, at: 0 },
+  diskUsage:   { data: null, at: 0 },
+};
+const STATUS_LOG_TTL  = 500;   // ms — status log can lag by up to 500 ms
+const UPLOADED_LOG_TTL = 1000; // ms — uploaded list changes less often
+const DISK_USAGE_TTL  = 60000; // ms — disk usage is expensive, cache for 1 min
 
-function loadUploadedLog() {
+function _readJson(filePath, fallback) {
   try {
-    if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+    if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch {
     try {
-      if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+      if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch {}
   }
-  return [];
+  return fallback;
 }
 
+function loadUploadedLog() {
+  const c = _cache.uploadedLog;
+  if (c.data !== null && Date.now() - c.at < UPLOADED_LOG_TTL) return c.data;
+  c.data = _readJson(UPLOADED_LOG, []);
+  c.at   = Date.now();
+  return c.data;
+}
 
 function loadStatusLog() {
-  try {
-    if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
-  } catch {
-    try {
-      if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
-    } catch {}
-  }
-  return {};
+  const c = _cache.statusLog;
+  if (c.data !== null && Date.now() - c.at < STATUS_LOG_TTL) return c.data;
+  c.data = _readJson(STATUS_LOG, {});
+  c.at   = Date.now();
+  return c.data;
 }
 
 
 // Atomic write — always called from within a withFileLock block
 function saveStatusLog(statusLog) {
   atomicWrite(STATUS_LOG, JSON.stringify(statusLog, null, 2));
+  _cache.statusLog.at = 0; // invalidate read cache
 }
 
 function updateStatusLog(updates) {
@@ -155,6 +176,9 @@ function updateStatusLog(updates) {
 
 
 function getDiskUsage() {
+  const c = _cache.diskUsage;
+  if (c.data !== null && Date.now() - c.at < DISK_USAGE_TTL) return c.data;
+
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   try {
     const files = fs.readdirSync(folderPath);
@@ -171,12 +195,14 @@ function getDiskUsage() {
       }
     }
 
-    return {
+    const result = {
       totalBytes,
       totalKB: Math.round(totalBytes / 1024),
       totalMB: parseFloat((totalBytes / (1024 * 1024)).toFixed(2)),
       fileCount,
     };
+    _cache.diskUsage = { data: result, at: Date.now() };
+    return result;
   } catch (err) {
     return { totalBytes: 0, totalKB: 0, totalMB: 0, fileCount: 0 };
   }
@@ -916,13 +942,13 @@ app.post('/retry-callback', async (req, res) => {
     try {
       withFileLock(STATUS_LOG, () => {
         const l = loadStatusLog();
-        // Flat status key — covers both standalone files and merged-batch source files
-        l[filename] = resolvedStatus;
-        l[`${filename}_completedAt`] = resolvedCompletedAt;
-        // If this filename IS the merged batch record itself, update its object status too
-        if (typeof l[filename] === 'object') {
-          l[filename].status      = resolvedStatus;
-          l[filename].completedAt = resolvedCompletedAt;
+        // If this filename IS a merged batch record (object), preserve its metadata
+        if (typeof l[filename] === 'object' && l[filename] !== null) {
+          l[filename] = { ...l[filename], status: resolvedStatus, completedAt: resolvedCompletedAt };
+        } else {
+          // Flat status key — covers standalone source files
+          l[filename] = resolvedStatus;
+          l[`${filename}_completedAt`] = resolvedCompletedAt;
         }
         atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
       });
@@ -945,11 +971,37 @@ app.post('/retry-callback', async (req, res) => {
 });
 
 
-// GET /health — simple health check
 // GET /health — fast liveness probe for Render / uptime monitors.
 // Must respond in well under 5 s — deliberately does NO disk I/O.
 app.get('/health', (req, res) => {
-  res.json({ success: true, status: 'running', time: new Date().toISOString() });
+  const mem = process.memoryUsage();
+  const uptimeSecs = Math.floor(process.uptime());
+
+  // Cache warmth: peek at TTL without doing any I/O
+  const cacheStatus = {
+    statusLog: _cache.statusLog.at > 0 && (Date.now() - _cache.statusLog.at) < STATUS_LOG_TTL,
+    uploadedLog: _cache.uploadedLog.at > 0 && (Date.now() - _cache.uploadedLog.at) < UPLOADED_LOG_TTL,
+    diskUsage: _cache.diskUsage.at > 0 && (Date.now() - _cache.diskUsage.at) < DISK_USAGE_TTL,
+  };
+
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    status:  'ok',
+    uptime:  uptimeSecs,
+    uptimeHuman: uptimeSecs < 60
+      ? `${uptimeSecs}s`
+      : uptimeSecs < 3600
+        ? `${Math.floor(uptimeSecs / 60)}m ${uptimeSecs % 60}s`
+        : `${Math.floor(uptimeSecs / 3600)}h ${Math.floor((uptimeSecs % 3600) / 60)}m`,
+    memory: {
+      heapUsedMB: +(mem.heapUsed / 1024 / 1024).toFixed(1),
+      heapTotalMB: +(mem.heapTotal / 1024 / 1024).toFixed(1),
+      rssMB: +(mem.rss / 1024 / 1024).toFixed(1),
+    },
+    cache: cacheStatus,
+    node: process.version,
+    time: new Date().toISOString(),
+  });
 });
 
 
@@ -1075,381 +1127,295 @@ app.get('/summary', requireAuth, (req, res) => {
     },
     queue,
     files,
-    airtime: {
-      enabled:            statusLog._airtimeEnabled           || false,
-      windowStart:        statusLog._airtimeWindowStart       ?? 0,
-      windowEnd:          statusLog._airtimeWindowEnd         ?? 24,
-      stage:              statusLog._airtimeStage             || 'idle',
-      triggeredAt:        statusLog._airtimeTriggeredAt       || null,
-      lastCallbackAt:     statusLog._airtimeLastCallbackAt    || null,
-      lastError:          statusLog._airtimeLastError         || null,
-      load312Verified:    statusLog._airtimeLoad312Verified   ?? null,
-      load500Count:       statusLog._airtimeLoad500Count      ?? 0,
-      load500TotalAdded:  statusLog._airtimeLoad500TotalAdded ?? 0,
-      load500MaxRounds:   AIRTIME_LOAD500_MAX_ROUNDS,
-      load500TargetGhc:   AIRTIME_LOAD500_TARGET_GHC,
-    },
   });
 });
 
 
-// ── AIRTIME LOADING ────────────────────────────────────────
+// ── EVD AIRTIME API (gbeyfia.com) ──────────────────────────
+// Env vars: EVD_API_URL          — base URL, default https://gbeyfia.com/api/v1
+//           EVD_ACCOUNT_n_KEY, EVD_ACCOUNT_n_PHONE, EVD_ACCOUNT_n_AMOUNT,
+//           EVD_ACCOUNT_n_NETWORK  (n = 1, 2, 3, …)
+//           EVD_CALLBACK_SECRET    — used to verify incoming callbacks via HMAC-SHA256
 
-const AIRTIME_LOAD500_MAX_ROUNDS = 9;
-const AIRTIME_LOAD500_TARGET_GHC = 4500;
-const AIRTIME_BALANCE_TOLERANCE  = 50; // GHC — acceptable shortfall when verifying balance increase
-const AIRTIME_MAX_RETRIES        = 2;  // max retry attempts per stage before proceeding anyway
+const EVD_API_BASE = (process.env.EVD_API_URL || 'https://gbeyfia.com/api/v1').replace(/\/$/, '');
 
-// Fetch the portal account balance directly from the MTN up2u API using the
-// session cookies persisted by the bot. Falls back to the signalling mechanism
-// (requesting a fresh read from the Playwright bot) if no cookies are available.
-async function waitForFreshAccountBalance(timeoutMs = 20000) {
-  // ── Fast path: call the API directly with stored session cookies ──────────
-  const sl = loadStatusLog();
-  const cookieHeader = sl._portalCookieHeader;
-  if (cookieHeader) {
+const EVD_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.evd-orders.json');
+
+function loadEvdLog() {
+  try {
+    if (fs.existsSync(EVD_LOG)) return JSON.parse(fs.readFileSync(EVD_LOG, 'utf8'));
+  } catch {
     try {
-      const res = await fetch('https://up2u.mtn.com.gh/providers/api/check-balance', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json, text/plain, */*',
-          'Content-Type': 'application/json',
-          'Cookie': cookieHeader,
-          'Origin': 'https://up2u.mtn.com.gh',
-          'Referer': 'https://up2u.mtn.com.gh/',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        body: JSON.stringify({}),
-      });
-      const data = await res.json();
-      if (data.success && data.body && typeof data.body.MainAccountBalanceCedis === 'number') {
-        const accountBalance     = data.body.MainAccountBalanceCedis;
-        const accountBalanceText = `GH¢ ${accountBalance.toFixed(2)}`;
-        console.log(`✅ Portal balance fetched directly: ${accountBalanceText}`);
-        // Write the fresh value back so the status log stays current
-        updateStatusLog({
-          _lastAccountBalance:     accountBalance,
-          _lastAccountBalanceText: accountBalanceText,
-          _lastBalanceCheckedAt:   new Date().toISOString(),
-        });
-        return loadStatusLog();
-      }
-      console.warn('⚠️  check-balance API returned unexpected response — falling back to bot signal');
-    } catch (err) {
-      console.warn(`⚠️  check-balance API call failed: ${err.message} — falling back to bot signal`);
-    }
+      if (fs.existsSync(EVD_LOG)) return JSON.parse(fs.readFileSync(EVD_LOG, 'utf8'));
+    } catch {}
   }
-
-  // ── Fallback: signal bot and wait for it to do a Playwright balance read ──
-  console.log('🔄 No stored cookies — requesting balance refresh from bot…');
-  const requestedAt = Date.now();
-  withFileLock(STATUS_LOG, () => {
-    const s = loadStatusLog();
-    saveStatusLog({ ...s, _balanceRefreshRequested: true });
-  });
-
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 1500));
-    const s = loadStatusLog();
-    const checkedAt = s._lastBalanceCheckedAt;
-    if (!s._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
-      console.log('✅ Portal balance refreshed via bot');
-      return s;
-    }
-  }
-  // Timed out
-  withFileLock(STATUS_LOG, () => {
-    const s = loadStatusLog();
-    if (s._balanceRefreshRequested) saveStatusLog({ ...s, _balanceRefreshRequested: false });
-  });
-  console.warn('⚠️  Portal balance refresh timed out — using last known value');
-  return loadStatusLog();
+  return [];
 }
 
-// Retry load_312 via ntfy (used when USSD failure is confirmed by portal).
-async function dispatchLoad312Ntfy() {
-  try {
-    const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
-    const r = await fetch(ntfyUrl, { method: 'PUT', body: 'load_312' });
-    if (r.ok) {
-      console.log('📤 Airtime load_312 retried via ntfy');
-      updateStatusLog({ _airtimeStage: 'load_312_sent' });
+function saveEvdLog(orders) {
+  atomicWrite(EVD_LOG, JSON.stringify(orders, null, 2));
+}
+
+function upsertEvdOrder(order) {
+  // Strip undefined values so partial updates (e.g. callbacks missing some fields)
+  // do not overwrite existing good data with undefined.
+  const clean = Object.fromEntries(Object.entries(order).filter(([, v]) => v !== undefined));
+  withFileLock(EVD_LOG, () => {
+    const orders = loadEvdLog();
+    const idx = orders.findIndex(o => o.order_id === clean.order_id);
+    if (idx >= 0) {
+      orders[idx] = { ...orders[idx], ...clean };
     } else {
-      const msg = `ntfy HTTP ${r.status}`;
-      console.warn(`⚠️  load_312 retry ntfy returned ${r.status}`);
-      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
+      orders.unshift(clean); // newest first
     }
-  } catch (err) {
-    console.error(`❌ load_312 retry failed: ${err.message}`);
-    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
-  }
-}
-
-// Send load_500 to ntfy and record the sent round number in the status log.
-// Snapshots the current portal account balance before dispatching so the credit
-// verifier can compare before/after to confirm the phone's transfer arrived.
-async function dispatchLoad500Ntfy(roundNumber) {
-  const slNow = loadStatusLog();
-  try {
-    const ntfyUrl = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
-    const r = await fetch(ntfyUrl, { method: 'PUT', body: 'load_500' });
-    if (r.ok) {
-      console.log(`📤 Airtime load_500 round ${roundNumber}/${AIRTIME_LOAD500_MAX_ROUNDS} dispatched`);
-      updateStatusLog({
-        _airtimeStage: 'load_500_sent',
-        _airtimeLoad500SentCount: roundNumber,
-        // NOTE: _airtimeLoad500RetryCount is intentionally NOT reset here —
-        // the caller owns the retry counter (fresh starts reset it explicitly).
-        _airtimeAcctBalBeforeLoad500: slNow._lastAccountBalance ?? null,
-      });
-    } else {
-      const msg = `ntfy HTTP ${r.status}`;
-      console.warn(`⚠️  Airtime load_500 round ${roundNumber} ntfy returned ${r.status}`);
-      updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: msg });
-    }
-  } catch (err) {
-    console.error(`❌ Airtime load_500 round ${roundNumber} dispatch failed: ${err.message}`);
-    updateStatusLog({ _airtimeStage: 'error', _airtimeLastError: err.message });
-  }
-}
-
-// GET /airtime/status — current airtime feature state (open endpoint)
-app.get('/airtime/status', (req, res) => {
-  const sl = loadStatusLog();
-  res.json({
-    success: true,
-    airtime: {
-      enabled:            sl._airtimeEnabled           || false,
-      windowStart:        sl._airtimeWindowStart       ?? 0,
-      windowEnd:          sl._airtimeWindowEnd         ?? 1440,
-      stage:              sl._airtimeStage             || 'idle',
-      triggeredAt:        sl._airtimeTriggeredAt       || null,
-      lastCallbackAt:     sl._airtimeLastCallbackAt    || null,
-      lastError:          sl._airtimeLastError         || null,
-      load312Verified:    sl._airtimeLoad312Verified   ?? null,
-      load500Count:       sl._airtimeLoad500Count      ?? 0,
-      load500TotalAdded:  sl._airtimeLoad500TotalAdded ?? 0,
-      load500MaxRounds:   AIRTIME_LOAD500_MAX_ROUNDS,
-      load500TargetGhc:   AIRTIME_LOAD500_TARGET_GHC,
-    },
+    saveEvdLog(orders);
   });
-});
+}
 
-// POST /airtime/settings — update airtime config (dashboard session required)
-app.post('/airtime/settings', (req, res) => {
+// Load all configured EVD accounts from env (EVD_ACCOUNT_1_*, EVD_ACCOUNT_2_*, …)
+function getEvdAccounts() {
+  const accounts = [];
+  for (let n = 1; n <= 20; n++) {
+    const key     = process.env[`EVD_ACCOUNT_${n}_KEY`];
+    const phone   = process.env[`EVD_ACCOUNT_${n}_PHONE`];
+    const amount  = parseFloat(process.env[`EVD_ACCOUNT_${n}_AMOUNT`] || '0');
+    const network = process.env[`EVD_ACCOUNT_${n}_NETWORK`] || 'MTN';
+    if (!key || key.startsWith('evd_your')) break; // stop at placeholder / missing
+    accounts.push({ index: n, key, phone, amount, network });
+  }
+  return accounts;
+}
+
+// POST /evd/send — trigger an airtime top-up via the gbeyfia.com API.
+// Body: { accountIndex? }  — defaults to account 1 (or send all if accountIndex === 'all')
+app.post('/evd/send', async (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
 
-  const { enabled, windowStart, windowEnd } = req.body || {};
-  const updates = {};
-  if (typeof enabled === 'boolean') updates._airtimeEnabled = enabled;
-  if (typeof windowStart === 'number' && windowStart >= 0 && windowStart <= 1439) updates._airtimeWindowStart = Math.floor(windowStart);
-  if (typeof windowEnd   === 'number' && windowEnd   >= 1 && windowEnd   <= 1440) updates._airtimeWindowEnd   = Math.floor(windowEnd);
+  const accounts = getEvdAccounts();
+  if (!accounts.length) {
+    return res.status(500).json({ success: false, error: 'No EVD accounts configured in environment' });
+  }
 
-  updateStatusLog(updates);
-  const sl = loadStatusLog();
+  const { accountIndex } = req.body || {};
+  const targets = (accountIndex === 'all')
+    ? accounts
+    : [accounts[(parseInt(accountIndex) || 1) - 1]].filter(Boolean);
+
+  if (!targets.length) {
+    return res.status(400).json({ success: false, error: `Account ${accountIndex} not found` });
+  }
+
+  const results = [];
+  for (const acct of targets) {
+    const ref = `evans_bot_${Date.now()}`;
+    const payload = {
+      key:     acct.key,
+      phone:   acct.phone,
+      amount:  acct.amount,
+      network: acct.network,
+      ref,
+    };
+
+    console.log(`📡 EVD send: account ${acct.index} — GH¢ ${acct.amount} → ${acct.phone} (${acct.network}) ref=${ref}`);
+
+    try {
+      const r = await fetch(`${EVD_API_BASE}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await r.json().catch(() => ({}));
+
+      if (r.ok && data.success) {
+        const order = {
+          order_id:    data.order_id,
+          account:     acct.index,
+          phone:       acct.phone,
+          network:     acct.network,
+          amount:      data.amount ?? acct.amount,
+          status:      data.status ?? 'queued',
+          ref:         data.ref ?? ref,
+          chunks:      data.chunks ?? null,
+          sentAt:      new Date().toISOString(),
+          completedAt: null,
+          paidAmount:  null,
+        };
+        upsertEvdOrder(order);
+        console.log(`✅ EVD order #${data.order_id} queued — ${acct.phone} GH¢ ${order.amount}`);
+        results.push({ success: true, account: acct.index, ...data });
+      } else {
+        // Map HTTP codes to meaningful messages
+        const HTTP_ERRORS = {
+          401: 'Bad or missing API key',
+          402: 'Insufficient EVD wallet balance',
+          403: 'EVD account inactive or deleted',
+          422: 'Validation error — check phone/amount/network',
+          500: 'EVD server error — retry later',
+          503: 'EVD maintenance mode — retry later',
+        };
+        const msg = data.message || HTTP_ERRORS[r.status] || `HTTP ${r.status}`;
+        console.warn(`⚠️  EVD send account ${acct.index} failed: ${msg}`);
+        results.push({ success: false, account: acct.index, httpStatus: r.status, error: msg });
+      }
+    } catch (err) {
+      console.error(`❌ EVD send account ${acct.index} error: ${err.message}`);
+      results.push({ success: false, account: acct.index, error: err.message });
+    }
+  }
+
+  const allOk = results.every(r => r.success);
+  return res.status(allOk ? 200 : 207).json({ success: allOk, results });
+});
+
+// POST /evd/callback — receives order.completed webhook from gbeyfia.com.
+// Verified via HMAC-SHA256: X-EVD-Signature header = hmac(EVD_CALLBACK_SECRET, raw body).
+// NOTE: express.json() (global) parses the body before any route-level middleware runs, so
+// express.raw() cannot be used here. Raw body is captured via the verify hook on express.json().
+app.post('/evd/callback', (req, res) => {
+  const secret = process.env.EVD_CALLBACK_SECRET;
+  if (secret && secret !== 'your_evd_callback_secret_here') {
+    const sig  = req.headers['x-evd-signature'] || '';
+    const hmac = crypto.createHmac('sha256', secret).update(req.rawBody || '').digest('hex');
+    // Guard length before timingSafeEqual — it throws RangeError when buffers differ in size
+    if (sig.length !== hmac.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(hmac))) {
+      console.warn('⚠️  EVD callback: invalid signature');
+      return res.status(401).json({ success: false, error: 'Invalid signature' });
+    }
+  }
+
+  // req.body is already parsed by the global express.json() middleware
+  const body = req.body;
+  if (!body || typeof body !== 'object') {
+    return res.status(400).json({ success: false, error: 'Invalid JSON body' });
+  }
+
+  const { event, order_id, status, paid_amount, phone, ref, chunks, timestamp } = body;
+
+  console.log(`📲 EVD callback: event=${event} order_id=${order_id} status=${status} phone=${phone} amount=${paid_amount}`);
+
+  if (order_id != null) {
+    // Only stamp completedAt for terminal statuses — intermediate updates like
+    // "queued" or "processing" should not set a premature completedAt.
+    const TERMINAL = ['completed', 'failed', 'cancelled', 'success'];
+    const isTerminal = status && TERMINAL.includes(status.toLowerCase());
+    upsertEvdOrder({
+      order_id,
+      phone:       phone       ?? undefined,
+      status:      status      ?? undefined,
+      paidAmount:  paid_amount ?? undefined,
+      ref:         ref         ?? undefined,
+      chunks:      chunks      ?? undefined,
+      completedAt: isTerminal
+        ? (timestamp ? new Date(timestamp).toISOString() : new Date().toISOString())
+        : undefined,
+    });
+  }
+
+  return res.json({ success: true });
+});
+
+// GET /evd/history — paginated airtime order history.
+// Query: ?page=1&limit=50
+app.get('/evd/history', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const orders = loadEvdLog();
+  const page   = Math.max(1, parseInt(req.query.page  || '1'));
+  const limit  = Math.min(200, Math.max(1, parseInt(req.query.limit || '50')));
+  const start  = (page - 1) * limit;
+  const slice  = orders.slice(start, start + limit);
+
   return res.json({
     success: true,
-    airtime: {
-      enabled:     sl._airtimeEnabled     || false,
-      windowStart: sl._airtimeWindowStart ?? 0,
-      windowEnd:   sl._airtimeWindowEnd   ?? 1440,
-    },
+    total:   orders.length,
+    page,
+    limit,
+    orders:  slice,
   });
 });
 
-// POST /airtime/callback — USSD process signals a stage has completed.
-// Secured with x-airtime-secret header (or ?secret= query param) matching GROUPSHARE_CALLBACK_SECRET.
-// Body: { "stage": "load_312"|"load_500" }
-// The callback fires regardless of whether the USSD succeeded or failed, so the server
-// ALWAYS verifies success by checking the portal GHC balance for an increase after the callback.
-// If no increase is detected the load command is retried (up to AIRTIME_MAX_RETRIES times).
-app.post('/airtime/callback', async (req, res) => {
-  const expected = process.env.GROUPSHARE_CALLBACK_SECRET;
-  if (expected) {
-    const given = String(req.headers['x-airtime-secret'] || req.query.secret || '');
-    const expBuf   = Buffer.from(expected, 'utf8');
-    const givenBuf = Buffer.alloc(expBuf.length, 0);
-    Buffer.from(given, 'utf8').copy(givenBuf);
-    if (!crypto.timingSafeEqual(expBuf, givenBuf)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized' });
-    }
-  }
+// GET /evd/accounts — list configured accounts (keys masked).
+app.get('/evd/accounts', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const accounts = getEvdAccounts().map(a => ({
+    index:   a.index,
+    phone:   a.phone,
+    amount:  a.amount,
+    network: a.network,
+    key:     a.key.slice(0, 8) + '…',
+  }));
+  return res.json({ success: true, accounts });
+});
 
-  const { stage } = req.body || {};
-  if (!stage) return res.status(400).json({ success: false, error: 'Missing stage' });
+// Returns the effective enabled state: UI override (status log) takes precedence over env var.
+function evdAutoIsEnabled() {
+  const log = loadStatusLog();
+  if (log._evdAutoEnabled != null) return log._evdAutoEnabled === true;
+  return process.env.EVD_AUTO_ENABLED === 'true';
+}
 
-  // ── Shared portal-credit verifier ───────────────────────────────────────────
-  // The phone sends airtime to the portal via USSD, so the portal GHC cash balance
-  // INCREASES after a successful transfer. Fetches a fresh portal balance and compares
-  // against the snapshot taken before the USSD was sent. Returns { verified, credited, note }.
-  async function verifyPortalCredit(acctBefore, expectedGhc, label) {
-    if (acctBefore == null) {
-      return {
-        verified: true,
-        credited: null,
-        note: `No portal baseline before ${label} — assuming success`,
-      };
-    }
-    console.log(`🔍 ${label}: checking portal account balance increase (expected ~GH¢ ${expectedGhc})…`);
-    const freshSl   = await waitForFreshAccountBalance(20000);
-    const acctAfter = freshSl._lastAccountBalance;
-    if (acctAfter == null) {
-      return {
-        verified: true,
-        credited: null,
-        note: `Portal balance unavailable after ${label} — assuming success`,
-      };
-    }
-    const credited = acctAfter - acctBefore;
-    if (credited >= expectedGhc - AIRTIME_BALANCE_TOLERANCE) {
-      return {
-        verified: true,
-        credited,
-        acctAfter,
-        note: `Portal confirmed GH¢ ${credited.toFixed(2)} received — USSD succeeded`,
-      };
-    }
-    return {
-      verified: false,
-      credited,
-      acctAfter,
-      note: `Portal: GH¢ ${credited.toFixed(2)} received (expected ~${expectedGhc}) — USSD failed`,
-    };
-  }
+// Returns effective time window: status-log override > env var > null.
+function evdAutoWindow() {
+  const log = loadStatusLog();
+  return {
+    startTime: log._evdAutoStartTime ?? process.env.EVD_AUTO_START_TIME ?? null,
+    endTime:   log._evdAutoEndTime   ?? process.env.EVD_AUTO_END_TIME   ?? null,
+  };
+}
 
-  // ── load_312 callback ──────────────────────────────────────────────────────
-  if (stage === 'load_312') {
-    const sl = loadStatusLog();
-    if (sl._airtimeStage !== 'load_312_sent') {
-      console.log(`⚡ load_312 callback ignored (current stage: ${sl._airtimeStage})`);
-      return res.json({ success: true, action: 'ignored', currentStage: sl._airtimeStage });
-    }
+// GET /evd/auto-status — current state of the auto-loader.
+app.get('/evd/auto-status', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const enabled    = evdAutoIsEnabled();
+  const minBalance = parseFloat(process.env.EVD_AUTO_MIN_BALANCE_GHC || '20');
+  const pollMins   = parseFloat(process.env.EVD_AUTO_POLL_MINS || '3');
+  const { startTime, endTime } = evdAutoWindow();
+  const log        = loadStatusLog();
+  const ghcBalance = log._lastAccountBalance ?? null;
+  const orders     = loadEvdLog();
+  const inFlight   = orders.find(o => { const s = (o.status||'').toLowerCase(); return s==='queued'||s==='processing'||s==='pending'; });
+  return res.json({
+    success: true,
+    enabled,
+    minBalance,
+    pollMins,
+    startTime,
+    endTime,
+    currentBalance: ghcBalance,
+    belowThreshold: ghcBalance != null && ghcBalance < minBalance,
+    inFlightOrder:  inFlight ? { order_id: inFlight.order_id, status: inFlight.status } : null,
+  });
+});
 
-    console.log('📲 Airtime load_312 callback received — verifying via portal…');
-    updateStatusLog({ _airtimeStage: 'load_312_processing' }); // block re-entrant callbacks
+// POST /evd/auto-toggle — enable or disable the auto-loader from the UI.
+// Body: { enabled: true|false }
+app.post('/evd/auto-toggle', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const { enabled } = req.body;
+  if (typeof enabled !== 'boolean') return res.status(400).json({ success: false, error: 'enabled must be boolean' });
+  updateStatusLog({ _evdAutoEnabled: enabled });
+  console.log(`🤖 EVD auto-loader ${enabled ? 'enabled' : 'disabled'} via dashboard`);
+  return res.json({ success: true, enabled });
+});
 
-    const { verified, credited, acctAfter, note: verificationNote } =
-      await verifyPortalCredit(sl._airtimeAcctBalBeforeLoad312, 312, 'load_312');
-
-    if (!verified) {
-      const retryCount = (sl._airtimeLoad312RetryCount ?? 0) + 1;
-      console.warn(`🔄 load_312 USSD failed — retry ${retryCount}/${AIRTIME_MAX_RETRIES}: ${verificationNote}`);
-
-      if (retryCount <= AIRTIME_MAX_RETRIES) {
-        updateStatusLog({
-          _airtimeStage: 'load_312_sent',
-          _airtimeLastCallbackAt: new Date().toISOString(),
-          _airtimeAcctBalBeforeLoad312: acctAfter ?? sl._airtimeAcctBalBeforeLoad312,
-          _airtimeLoad312RetryCount: retryCount,
-          _airtimeLastError: verificationNote,
-        });
-        res.json({ success: true, action: 'load_312_retry', verified: false, note: verificationNote });
-        await new Promise(r => setTimeout(r, 5000));
-        await dispatchLoad312Ntfy();
-        return;
-      }
-      console.warn(`⚠️  load_312 max retries (${AIRTIME_MAX_RETRIES}) reached — proceeding to load_500 anyway`);
-    } else {
-      console.log(`✅ load_312 verified: ${verificationNote}`);
-    }
-
-    updateStatusLog({
-      _airtimeStage: 'load_312_verified',
-      _airtimeLastCallbackAt: new Date().toISOString(),
-      _airtimeLoad312Verified: verified,
-      _airtimeLoad312RetryCount: 0,
-      _airtimeLoad500Count: 0,
-      _airtimeLoad500TotalAdded: 0,
-      _airtimeLoad500SentCount: 0,
-    });
-
-    res.json({ success: true, action: 'load_312_received', verified, note: verificationNote });
-    await new Promise(r => setTimeout(r, 5000));
-    await dispatchLoad500Ntfy(1);
-    return;
-  }
-
-  // ── load_500 callback ──────────────────────────────────────────────────────
-  if (stage === 'load_500') {
-    const sl = loadStatusLog();
-
-    if (sl._airtimeStage === 'done') {
-      console.log('⚡ load_500 callback ignored (already done)');
-      return res.json({ success: true, action: 'already_done' });
-    }
-    if (sl._airtimeStage !== 'load_500_sent') {
-      console.log(`⚡ load_500 callback ignored (current stage: ${sl._airtimeStage})`);
-      return res.json({ success: true, action: 'ignored', currentStage: sl._airtimeStage });
-    }
-
-    const prevCount  = sl._airtimeLoad500Count ?? 0;
-    const newCount   = prevCount + 1;
-    let   totalAdded = sl._airtimeLoad500TotalAdded ?? 0;
-
-    console.log(`📲 Airtime load_500 round ${newCount} callback received — verifying via portal…`);
-    updateStatusLog({ _airtimeStage: 'load_500_processing' }); // block re-entrant callbacks
-
-    const { verified, credited, acctAfter, note: verificationNote } =
-      await verifyPortalCredit(sl._airtimeAcctBalBeforeLoad500, 500, `load_500 round ${newCount}`);
-
-    if (!verified) {
-      const retryCount = (sl._airtimeLoad500RetryCount ?? 0) + 1;
-      console.warn(`🔄 load_500 round ${newCount} USSD failed — retry ${retryCount}/${AIRTIME_MAX_RETRIES}: ${verificationNote}`);
-
-      if (retryCount <= AIRTIME_MAX_RETRIES) {
-        updateStatusLog({
-          _airtimeStage: 'load_500_sent',
-          _airtimeLastCallbackAt: new Date().toISOString(),
-          _airtimeAcctBalBeforeLoad500: acctAfter ?? sl._airtimeAcctBalBeforeLoad500,
-          _airtimeLoad500RetryCount: retryCount,
-          _airtimeLastError: verificationNote,
-        });
-        res.json({ success: true, action: `load_500_round_${newCount}_retry`, verified: false, note: verificationNote });
-        await new Promise(r => setTimeout(r, 5000));
-        await dispatchLoad500Ntfy(newCount); // retry same round
-        return;
-      }
-      console.warn(`⚠️  load_500 round ${newCount} max retries (${AIRTIME_MAX_RETRIES}) reached — skipping round`);
-      // Skipped round: credited amount (0 or partial) is not counted toward target
-    } else {
-      console.log(`✅ load_500 round ${newCount} verified: ${verificationNote}`);
-      totalAdded += credited ?? 500; // credited is always set when verified=true with a baseline
-    }
-
-    const isDone = newCount >= AIRTIME_LOAD500_MAX_ROUNDS || totalAdded >= AIRTIME_LOAD500_TARGET_GHC;
-
-    console.log(`📊 load_500 round ${newCount}/${AIRTIME_LOAD500_MAX_ROUNDS} — total added: GH¢ ${totalAdded.toFixed(2)}/${AIRTIME_LOAD500_TARGET_GHC} — done: ${isDone}`);
-
-    updateStatusLog({
-      _airtimeStage: isDone ? 'done' : 'load_500_processing',
-      _airtimeLastCallbackAt: new Date().toISOString(),
-      _airtimeLoad500Count: newCount,
-      _airtimeLoad500TotalAdded: totalAdded,
-      _airtimeLoad500RetryCount: 0,
-    });
-
-    if (isDone) {
-      console.log(`🎉 Airtime load complete! ${newCount} round(s), GH¢ ${totalAdded.toFixed(2)} total added`);
-      return res.json({ success: true, action: 'done', rounds: newCount, totalAdded });
-    }
-
-    res.json({
-      success: true,
-      action: `load_500_round_${newCount}_complete`,
-      verified,
-      note: verificationNote,
-      roundsCompleted: newCount,
-      roundsRemaining: AIRTIME_LOAD500_MAX_ROUNDS - newCount,
-      totalAdded,
-    });
-
-    await new Promise(r => setTimeout(r, 5000));
-    await dispatchLoad500Ntfy(newCount + 1);
-    return;
-  }
-
-  return res.status(400).json({ success: false, error: `Unknown stage: ${stage}` });
+// POST /evd/auto-settings — update the active time window from the dashboard.
+// Body: { startTime: "HH:MM" | null, endTime: "HH:MM" | null }
+app.post('/evd/auto-settings', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const { startTime, endTime } = req.body || {};
+  const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+  if (startTime != null && startTime !== '' && !TIME_RE.test(startTime))
+    return res.status(400).json({ success: false, error: 'startTime must be HH:MM (24 h)' });
+  if (endTime != null && endTime !== '' && !TIME_RE.test(endTime))
+    return res.status(400).json({ success: false, error: 'endTime must be HH:MM (24 h)' });
+  const updates = {};
+  if (startTime !== undefined) updates._evdAutoStartTime = startTime || null;
+  if (endTime   !== undefined) updates._evdAutoEndTime   = endTime   || null;
+  updateStatusLog(updates);
+  const { startTime: st, endTime: et } = evdAutoWindow();
+  console.log(`🤖 EVD active window updated: ${st || 'any'}–${et || 'any'} UTC`);
+  return res.json({ success: true, startTime: st, endTime: et });
 });
 
 
@@ -1458,6 +1424,101 @@ app.post('/airtime/callback', async (req, res) => {
 console.log(`🧹 File retention set to ${RETENTION_HOURS} hours`);
 cleanupOldFiles();
 setInterval(cleanupOldFiles, 60 * 60 * 1000);
+
+// ── EVD AUTO AIRTIME LOADER ────────────────────────────────
+// Polls the MTN portal GHC balance every EVD_AUTO_POLL_MINS minutes.
+// If balance < EVD_AUTO_MIN_BALANCE_GHC and no EVD order is currently
+// in-flight (queued/processing), triggers a send for all configured accounts.
+// Cooldown is order-state-based, not time-based: once the pending order
+// completes (via webhook) the next poll will re-evaluate and buy again if
+// still low, so response time is bounded by the poll interval only.
+async function runEvdAutoLoader() {
+  if (!evdAutoIsEnabled()) return;
+
+  // Active-window check — only run between configured start and end times (24 h HH:MM, UTC).
+  // Window is set via dashboard (status log) or env var fallback.
+  const { startTime, endTime } = evdAutoWindow();
+  if (startTime && endTime) {
+    const now  = new Date();
+    const hhmm = `${String(now.getUTCHours()).padStart(2,'0')}:${String(now.getUTCMinutes()).padStart(2,'0')}`;
+    if (hhmm < startTime || hhmm >= endTime) {
+      console.log(`🤖 EVD auto-loader: outside active window (${startTime}–${endTime} UTC), current UTC time ${hhmm} — skipped`);
+      return;
+    }
+  }
+
+  const minBalance = parseFloat(process.env.EVD_AUTO_MIN_BALANCE_GHC || '20');
+  const log        = loadStatusLog();
+  const ghcBalance = log._lastAccountBalance;
+
+  // Can't evaluate without a known GHC balance
+  if (ghcBalance == null) {
+    console.log('🤖 EVD auto-loader: skipped — GHC account balance not yet known');
+    return;
+  }
+
+  if (ghcBalance >= minBalance) return; // balance is fine
+
+  // Check if any EVD order is still in-flight (queued / processing)
+  const orders = loadEvdLog();
+  const inFlight = orders.find(o => {
+    const s = (o.status || '').toLowerCase();
+    return s === 'queued' || s === 'processing' || s === 'pending';
+  });
+  if (inFlight) {
+    console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} but order #${inFlight.order_id} is still ${inFlight.status} — waiting`);
+    return;
+  }
+
+  console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} — triggering purchase for all accounts`);
+
+  const accounts = getEvdAccounts();
+  for (const acct of accounts) {
+    const ref = `evans_bot_auto_${Date.now()}`;
+    const payload = { key: acct.key, phone: acct.phone, amount: acct.amount, network: acct.network, ref };
+    try {
+      const r    = await fetch(`${EVD_API_BASE}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.success) {
+        upsertEvdOrder({
+          order_id:    data.order_id,
+          account:     acct.index,
+          phone:       acct.phone,
+          network:     acct.network,
+          amount:      data.amount ?? acct.amount,
+          status:      data.status ?? 'queued',
+          ref:         data.ref ?? ref,
+          chunks:      data.chunks ?? null,
+          sentAt:      new Date().toISOString(),
+          completedAt: null,
+          paidAmount:  null,
+          auto:        true,
+        });
+        console.log(`✅ EVD auto-loader: order #${data.order_id} queued — GH¢ ${acct.amount} → ${acct.phone}`);
+      } else {
+        const HTTP_ERRORS = { 401: 'Bad API key', 402: 'Insufficient EVD wallet balance', 422: 'Validation error', 500: 'EVD server error', 503: 'EVD maintenance' };
+        const msg = data.message || HTTP_ERRORS[r.status] || `HTTP ${r.status}`;
+        console.warn(`⚠️  EVD auto-loader account ${acct.index} failed: ${msg}`);
+      }
+    } catch (err) {
+      console.error(`❌ EVD auto-loader account ${acct.index} error: ${err.message}`);
+    }
+  }
+}
+
+{
+  const pollMins = Math.max(1, parseFloat(process.env.EVD_AUTO_POLL_MINS || '3'));
+  if (process.env.EVD_AUTO_ENABLED === 'true') {
+    const { startTime: _st, endTime: _et } = evdAutoWindow();
+    const window = (_st && _et) ? `, active ${_st}–${_et} UTC` : ', active all day';
+    console.log(`🤖 EVD auto-loader enabled — threshold GH¢ ${process.env.EVD_AUTO_MIN_BALANCE_GHC || '20'}, polling every ${pollMins} min${window}`);
+  }
+  setInterval(runEvdAutoLoader, pollMins * 60 * 1000);
+}
 
 
 // ── PORT BINDING ───────────────────────────────────────────

@@ -46,9 +46,39 @@ function updateStatusLog(updates) {
   });
 }
 
+// Per-title dedup: tracks last time each alert title was successfully sent.
+// Prevents repeated triggers from the same recurring condition from flooding
+// the Telegram chat and hitting rate-limit 429.
+const _alertLastSentAt = new Map();
+const ALERT_COOLDOWN_MS = parseInt(process.env.ALERT_COOLDOWN_MINS || '5') * 60 * 1000;
+
+// Titles that are always sent regardless of cooldown — one-off events with
+// unique outcomes (success / permanent failure) that should never be suppressed.
+const ALERT_NO_COOLDOWN = new Set([
+  '🎉 MTN GroupShare — Airtime Loaded',
+  '🎉 MTN GroupShare — Data Purchased',
+  '🚫 MTN GroupShare — Merged Batch Abandoned',
+  '🚫 MTN GroupShare — File Abandoned',
+  '❌ MTN GroupShare — Merged Upload Failed',
+  '❌ MTN GroupShare — Upload Failed',
+  '❌ MTN GroupShare — Purchase Aborted',
+]);
+
 function sendAlert(title, message) {
   console.warn(`🔔 ALERT: ${title} — ${message}`);
   notifier.notify({ title, message, sound: true, wait: false });
+
+  // Dedup check — suppress repeated alerts for the same event type within cooldown
+  if (!ALERT_NO_COOLDOWN.has(title)) {
+    const lastSent = _alertLastSentAt.get(title) || 0;
+    const msSince = Date.now() - lastSent;
+    if (msSince < ALERT_COOLDOWN_MS) {
+      const remainMins = Math.ceil((ALERT_COOLDOWN_MS - msSince) / 60000);
+      console.log(`🔕 Alert suppressed (cooldown ${remainMins} min remaining): ${title}`);
+      return;
+    }
+  }
+  _alertLastSentAt.set(title, Date.now());
 
   const text = `🔔 <b>${escapeHtml(title)}</b>\n${escapeHtml(message)}`;
   const recipients = [
@@ -66,8 +96,10 @@ function sendAlert(title, message) {
         .catch(err => {
           const detail = err.code ? `${err.code}: ${err.message}` : err.message;
           if (attempt < 3) {
-            console.warn(`⚠️  Telegram alert failed (attempt ${attempt}): ${detail} — retrying in 10s...`);
-            setTimeout(() => trySend(attempt + 1), 10000);
+            // Respect Telegram's retry_after on 429; fall back to 15s for other errors
+            const retryAfterMs = (err.response?.body?.parameters?.retry_after || 15) * 1000;
+            console.warn(`⚠️  Telegram alert failed (attempt ${attempt}): ${detail} — retrying in ${Math.round(retryAfterMs/1000)}s...`);
+            setTimeout(() => trySend(attempt + 1), retryAfterMs);
           } else {
             console.error(`❌ Telegram alert failed after ${attempt} attempts: ${detail}`);
           }
@@ -138,194 +170,6 @@ async function sendCallback(filename, status, completedAt, orderOverride = null)
   }
 }
 
-// Fire-and-forget: send `load_312` to ntfy.sh to kick off the airtime loading sequence.
-// Respects the _airtimeEnabled flag and the configured UTC time window in the status log.
-async function triggerAirtimeLoad(page, context) {
-  const sl = loadStatusLog();
-  if (!sl._airtimeEnabled) return;
-
-  // Time-window check using server local time (server must be set to GMT+0 / UTC).
-  // Stored as minutes since midnight; legacy whole-hour values ≤24 are auto-multiplied.
-  const _now    = new Date();
-  const nowMins = _now.getHours() * 60 + _now.getMinutes();
-  const normWin  = v => (v == null ? null : v <= 24 ? v * 60 : v);
-  const winStart = normWin(sl._airtimeWindowStart) ?? 0;
-  const winEnd   = normWin(sl._airtimeWindowEnd)   ?? 1440;
-  const inWindow = winStart <= winEnd
-    ? (nowMins >= winStart && nowMins < winEnd)
-    : (nowMins >= winStart || nowMins < winEnd);
-  const fmtMins  = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-
-  if (!inWindow) {
-    console.log(`⏰ Airtime load skipped — outside time window (${fmtMins(winStart)}–${fmtMins(winEnd)}, now ${fmtMins(nowMins)})`);
-    return;
-  }
-
-  const NTFY_URL     = (process.env.NTFY_URL || 'https://ntfy.sh').replace(/\/$/, '') + '/clickyfiedloader_5';
-  const TOLERANCE    = 50;   // GH¢ shortfall allowed when verifying increase
-  const MAX_RETRIES  = 2;    // extra attempts per stage if balance doesn’t move
-  const LOAD500_TARGET = 4500;
-  const LOAD500_MAX_ROUNDS = 9;
-
-  async function sendNtfy(cmd) {
-    const r = await fetch(NTFY_URL, { method: 'PUT', body: cmd });
-    if (!r.ok) throw new Error(`ntfy returned HTTP ${r.status}`);
-  }
-
-  async function getPortalBalance() {
-    const { accountBalance } = await checkBalance(page, context);
-    return accountBalance;
-  }
-
-  // ── load_312 ─────────────────────────────────────────────────────────
-  console.log('\n💰 Airtime load starting — sending load_312…');
-  updateStatusLog({
-    _airtimeStage:           'load_312_sent',
-    _airtimeTriggeredAt:     new Date().toISOString(),
-    _airtimeLoad500Count:    0,
-    _airtimeLoad500TotalAdded: 0,
-    _airtimeLoad312Verified: false,
-  });
-
-  let balBefore312   = await getPortalBalance();
-  let load312Success = false;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
-    try {
-      console.log(`📲 load_312 attempt ${attempt}/${MAX_RETRIES + 1}…`);
-      await sendNtfy('load_312');
-    } catch (err) {
-      console.error(`❌ load_312 ntfy failed: ${err.message}`);
-      break;
-    }
-
-    console.log('⏳ Waiting 35s for load_312 to process…');
-    await new Promise(r => setTimeout(r, 35000));
-
-    const balAfter  = await getPortalBalance();
-    if (balBefore312 == null || balAfter == null) {
-      console.warn(`⚠️  load_312 attempt ${attempt}: balance unavailable (before=${balBefore312}, after=${balAfter}) — assuming success`);
-      updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: true });
-      load312Success = true;
-      break;
-    }
-    const credited  = balAfter - balBefore312;
-    console.log(`📊 load_312 attempt ${attempt}: portal balance ${balBefore312} → ${balAfter} (credited GH¢ ${credited.toFixed(2)})`);
-
-    if (credited >= 312 - TOLERANCE) {
-      console.log(`✅ load_312 verified: GH¢ ${credited.toFixed(2)} received`);
-      updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: true });
-      load312Success = true;
-      break;
-    }
-
-    if (attempt <= MAX_RETRIES) {
-      console.warn(`⚠️  load_312 attempt ${attempt} insufficient (GH¢ ${credited.toFixed(2)}) — retrying…`);
-      balBefore312 = balAfter; // use latest balance as baseline for next attempt
-    }
-  }
-
-  if (!load312Success) {
-    console.warn('⚠️  load_312 not confirmed after all attempts — proceeding to load_500 anyway');
-    updateStatusLog({ _airtimeStage: 'load_312_verified', _airtimeLoad312Verified: false });
-  }
-
-  // Check total increase after load_312 — may already be enough
-  const afterLoad312Inc = await totalIncrease();
-  if (afterLoad312Inc != null && afterLoad312Inc >= TOTAL_TARGET - TOLERANCE) {
-    console.log(`✅ Total target reached after load_312 (GH¢ ${afterLoad312Inc.toFixed(2)}) — skipping load_500`);
-    updateStatusLog({ _airtimeStage: 'done', _airtimeLoad500TotalAdded: afterLoad312Inc });
-    sendAlert('🎉 MTN GroupShare — Airtime Loaded', `GH¢ ${afterLoad312Inc.toFixed(2)} added to portal`);
-    return;
-  }
-
-  // ── load_500 loop ──────────────────────────────────────────────────
-  let totalAdded = 0;
-  let round      = 0;
-
-  while (round < LOAD500_MAX_ROUNDS) {
-    // Check total increase from initial baseline before each round
-    const incNow = await totalIncrease();
-    if (incNow != null && incNow >= TOTAL_TARGET - TOLERANCE) {
-      console.log(`✅ Total target reached (GH¢ ${incNow.toFixed(2)} increase) — stopping load_500`);
-      totalAdded = incNow;
-      break;
-    }
-    round++;
-
-    console.log(`\n⏳ Waiting 30s before load_500 round ${round}…`);
-    await new Promise(r => setTimeout(r, 30000));
-
-    let balBefore500  = await getPortalBalance();
-    let roundSuccess  = false;
-
-    for (let attempt = 1; attempt <= MAX_RETRIES + 1; attempt++) {
-      try {
-        console.log(`📲 load_500 round ${round}/${LOAD500_MAX_ROUNDS} attempt ${attempt}/${MAX_RETRIES + 1}…`);
-        updateStatusLog({ _airtimeStage: 'load_500_sent', _airtimeLoad500SentCount: round });
-        await sendNtfy('load_500');
-      } catch (err) {
-        console.error(`❌ load_500 round ${round} ntfy failed: ${err.message}`);
-        break;
-      }
-
-      console.log('⏳ Waiting 35s for load_500 to process…');
-      await new Promise(r => setTimeout(r, 35000));
-
-      const balAfter = await getPortalBalance();
-      if (balBefore500 == null || balAfter == null) {
-        console.warn(`⚠️  load_500 round ${round} attempt ${attempt}: balance unavailable (before=${balBefore500}, after=${balAfter}) — assuming success`);
-        totalAdded += 500;
-        updateStatusLog({
-          _airtimeStage:            'load_500_processing',
-          _airtimeLoad500Count:     round,
-          _airtimeLoad500TotalAdded: totalAdded,
-        });
-        roundSuccess = true;
-        break;
-      }
-      const credited = balAfter - balBefore500;
-      console.log(`📊 load_500 round ${round} attempt ${attempt}: ${balBefore500} → ${balAfter} (credited GH¢ ${credited.toFixed(2)})`);
-
-      if (credited >= 500 - TOLERANCE) {
-        totalAdded += credited;
-        const incFromBase = await totalIncrease();
-        console.log(`✅ load_500 round ${round} verified: GH¢ ${credited.toFixed(2)} received — total increase from baseline: GH¢ ${incFromBase != null ? incFromBase.toFixed(2) : totalAdded.toFixed(2)}`);
-        updateStatusLog({
-          _airtimeStage:             'load_500_processing',
-          _airtimeLoad500Count:      round,
-          _airtimeLoad500TotalAdded: totalAdded,
-        });
-        roundSuccess = true;
-        break;
-      }
-
-      if (attempt <= MAX_RETRIES) {
-        console.warn(`⚠️  load_500 round ${round} attempt ${attempt} insufficient (GH¢ ${credited.toFixed(2)}) — retrying…`);
-        balBefore500 = balAfter;
-      }
-    }
-
-    if (!roundSuccess) {
-      console.warn(`⚠️  load_500 round ${round} not confirmed after all attempts — skipping round`);
-      updateStatusLog({ _airtimeLoad500Count: round });
-    }
-  }
-
-  // ── Summary ───────────────────────────────────────────────────────────
-  // Use real total increase from initial baseline for final accounting
-  const finalIncrease = (await totalIncrease()) ?? totalAdded;
-  updateStatusLog({ _airtimeStage: 'done', _airtimeLoad500TotalAdded: finalIncrease, _airtimeLoad500Count: round });
-
-  if (finalIncrease >= TOTAL_TARGET - TOLERANCE) {
-    console.log(`🎉 Airtime load complete! GH¢ ${finalIncrease.toFixed(2)} total increase in ${round} round(s)`);
-    sendAlert('🎉 MTN GroupShare — Airtime Loaded', `GH¢ ${finalIncrease.toFixed(2)} added to portal in ${round} load_500 round(s)`);
-  } else {
-    const msg = `GH¢ ${finalIncrease.toFixed(2)} / GH¢ ${TOTAL_TARGET} increase after ${round} round(s)`;
-    console.warn(`⚠️  Airtime load incomplete: ${msg}`);
-    sendAlert('⚠️ MTN GroupShare — Airtime Load Incomplete', msg);
-  }
-}
 
 // Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh,
 // purchase request, or newly received file. Returns true if woken early, false if full duration elapsed.
@@ -368,12 +212,26 @@ function getPendingFiles(folderPath) {
 
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
+
+  // Collect source files currently locked inside a batch that is active or
+  // timed-out. Active batches (IN_PROGRESS / PROCESSING) were already submitted
+  // to MTN — re-queuing risks double allocation. TIMEOUT batches require manual
+  // resolution via the dashboard before source files are released.
+  const lockedSourceFiles = new Set();
+  for (const val of Object.values(statusLog)) {
+    if (typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
+    if (val.status === 'IN_PROGRESS' || val.status === 'PROCESSING' || val.status === 'TIMEOUT') {
+      for (const sf of val.sourceFiles) lockedSourceFiles.add(sf.filename);
+    }
+  }
+
   const files = fs.readdirSync(folderPath)
     .filter(f => {
       if (!f.endsWith('.xlsx') && !f.endsWith('.xls')) return false;
       if (f.startsWith('NM-merged-')) return false; // temp merged files — never process as source
       if (uploaded.includes(f)) return false;
       if (statusLog[f] === 'ABANDONED') return false;
+      if (lockedSourceFiles.has(f)) return false; // owned by an active batch — do not re-queue
       return true;
     })
     .map(f => ({
@@ -627,8 +485,6 @@ async function purchaseData(page, context) {
   console.log('🎉 Data purchase complete!');
   sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText}`);
   updateStatusLog({ _purchaseStatus: 'DONE', _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`, _purchaseCompletedAt: new Date().toISOString() });
-  // Kick off airtime loading sequence — awaited so it runs before the purchase flow returns
-  triggerAirtimeLoad(page, context).catch(err => console.error(`❌ Airtime trigger error: ${err.message}`));
   return true;
 }
 
@@ -1022,16 +878,16 @@ async function uploadFile(page, excelFile) {
           atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
         });
         try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-merged automatically.`);
+        sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
       } else {
         updateStatusLog({
           [excelFile.name]: 'TIMEOUT',
           [`${excelFile.name}_timedOutAt`]: timedOutAt,
           [`${excelFile.name}_retryCount`]: retryCount,
         });
-        sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+        sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
       }
-      console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), will retry`);
+      console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), TIMEOUT — manual resolution required`);
     }
     return { error: true };
   }
@@ -1216,16 +1072,16 @@ async function uploadFile(page, excelFile) {
         });
         // Delete temp merged file — will be rebuilt on next cycle
         try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        sendAlert('⚠️ MTN GroupShare — Merged Batch Timeout', `Batch "${excelFile.name}" timed out (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-merged automatically.`);
+        sendAlert('⚠️ MTN GroupShare — Merged Batch Timeout', `Batch "${excelFile.name}" timed out (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
       } else {
         updateStatusLog({
           [excelFile.name]: 'TIMEOUT',
           [`${excelFile.name}_timedOutAt`]: timedOutAt,
           [`${excelFile.name}_retryCount`]: retryCount,
         });
-        sendAlert('⚠️ MTN GroupShare — Processing Timeout', `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry automatically.`);
+        sendAlert('⚠️ MTN GroupShare — Processing Timeout', `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
       }
-      console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — will retry next run`);
+      console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — TIMEOUT, manual resolution required`);
       await page.screenshot({ path: `timeout-${fileName}.png` });
     }
   }
@@ -1243,6 +1099,41 @@ async function run() {
   if (stuckPurchaseStatus === 'IN_PROGRESS') {
     console.warn('⚠️  Resetting stale _purchaseStatus IN_PROGRESS → FAILED on startup');
     updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: 'Reset on restart — previous purchase session interrupted' });
+  }
+
+  // ── Crash-recovery for in-flight batches ────────────────────────────────
+  // If the bot was killed while a merged batch was IN_PROGRESS (browser was
+  // interacting with MTN UI) or PROCESSING (file submitted, waiting for MTN),
+  // those batches are now orphaned — the polling loop that sets DONE/TIMEOUT
+  // died with the process.  Without this recovery they stay locked forever.
+  //
+  // IN_PROGRESS → PENDING : upload never confirmed; MTN's own "still processing"
+  //   banner will block a double-submit if MTN did receive the file.
+  // PROCESSING (> 40 min) → TIMEOUT : submission was confirmed; it has been long
+  //   enough that MTN would have finished or failed; normal retry path picks up.
+  // PROCESSING (≤ 40 min) : leave as-is; getPendingFiles() holds source files
+  //   locked; idle loop will age it out once the window passes.
+  {
+    const BATCH_PROCESSING_TIMEOUT_MS = 40 * 60 * 1000; // 40 min
+    const startupLog = loadStatusLog();
+    const startupUpdates = {};
+    for (const [key, val] of Object.entries(startupLog)) {
+      if (typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
+      if (val.status === 'IN_PROGRESS') {
+        startupUpdates[key] = { ...val, status: 'PENDING' };
+        console.warn(`⚠️  Startup: batch "${key}" was IN_PROGRESS — reset to PENDING (source files re-queued)`);
+      } else if (val.status === 'PROCESSING') {
+        const queuedMs = new Date(val.queuedAt || val.startedAt || val.createdAt).getTime();
+        const ageMin = Math.round((Date.now() - queuedMs) / 60000);
+        if (Date.now() - queuedMs > BATCH_PROCESSING_TIMEOUT_MS) {
+          startupUpdates[key] = { ...val, status: 'TIMEOUT' };
+          console.warn(`⚠️  Startup: batch "${key}" was PROCESSING for ${ageMin} min — marked TIMEOUT`);
+        } else {
+          console.log(`ℹ️  Startup: batch "${key}" is PROCESSING (${ageMin} min) — source files locked until 40-min window passes`);
+        }
+      }
+    }
+    if (Object.keys(startupUpdates).length) updateStatusLog(startupUpdates);
   }
 
   const browser = await chromium.launch({
@@ -1353,6 +1244,24 @@ async function run() {
       const pendingFiles = getPendingFiles(process.env.EXCEL_FOLDER_PATH);
 
       if (pendingFiles.length === 0) {
+        // Age out any PROCESSING batches whose polling window has now passed.
+        // This handles restarts where the batch was fresh (< 40 min) and couldn't
+        // be aged out at startup — once the window passes the source files unlock.
+        {
+          const BATCH_PROCESSING_TIMEOUT_MS = 40 * 60 * 1000;
+          const idleStatusLog = loadStatusLog();
+          const idleUpdates = {};
+          for (const [key, val] of Object.entries(idleStatusLog)) {
+            if (typeof val !== 'object' || !val.sourceFiles || val.status !== 'PROCESSING') continue;
+            const queuedMs = new Date(val.queuedAt || val.startedAt || val.createdAt).getTime();
+            if (Date.now() - queuedMs > BATCH_PROCESSING_TIMEOUT_MS) {
+              idleUpdates[key] = { ...val, status: 'TIMEOUT' };
+              console.warn(`⚠️  Idle: batch "${key}" was PROCESSING for ${Math.round((Date.now() - queuedMs)/60000)} min — marked TIMEOUT; source files unlocked for retry`);
+            }
+          }
+          if (Object.keys(idleUpdates).length) updateStatusLog(idleUpdates);
+        }
+
         idleCount++;
         const idleLog = loadStatusLog();
         const idleBalanceMB = idleLog._lastBalanceMB || 0;
