@@ -132,7 +132,7 @@ const PORT = process.env.OTP_PORT || 6060;
 
       const endpoint = session.httpEndpoint();
       if (process.env.NGROK_DOMAIN) endpoint.domain(process.env.NGROK_DOMAIN);
-      const listener = await endpoint.listenAndForward(`localhost:${PORT}`);
+      const listener = await endpoint.listenAndForward(`http://localhost:${PORT}`);
 
       const publicUrl = listener.url();
       console.log(`🌍 ngrok tunnel active: ${publicUrl}`);
