@@ -29,6 +29,34 @@ services:
         sync: false
       - key: GROUPSHARE_CALLBACK_SECRET
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN_2
+        sync: false
+      - key: TELEGRAM_CHAT_ID_2
+        sync: false
+      - key: NTFY_URL
+        sync: false
+      - key: MAX_FILE_RETRIES
+        value: "5"
+      - key: ALERT_COOLDOWN_MINS
+        value: "5"
+      - key: EVD_ACCOUNT_1_KEY
+        sync: false
+      - key: EVD_ACCOUNT_1_PHONE
+        sync: false
+      - key: EVD_ACCOUNT_1_AMOUNT
+        value: "1"
+      - key: EVD_ACCOUNT_1_NETWORK
+        value: "MTN"
+      - key: EVD_AUTO_ENABLED
+        value: "true"
+      - key: EVD_AUTO_MIN_BALANCE_GHC
+        value: "20"
+      - key: EVD_AUTO_POLL_MINS
+        value: "3"
     healthCheckPath: /health
     disk:
       name: groupshare-data

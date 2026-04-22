@@ -117,16 +117,20 @@ const PORT = process.env.OTP_PORT || 6060;
     console.warn('   → Set NGROK_DOMAIN to your static free domain for a consistent URL.');
   }
 
+  // ERR_NGROK_334 = domain already online (previous container still alive during Render deploy).
+  // Retry for up to ~3 minutes — Render terminates the old instance within ~60s.
+  const ENDPOINT_IN_USE = 'ERR_NGROK_334';
   let retries = 0;
-  const maxRetries = 3;
 
-  while (retries < maxRetries) {
+  while (true) {
+    const isEndpointInUse = (err) => err.message.includes(ENDPOINT_IN_USE);
+
     try {
       const session = await new ngrok.SessionBuilder()
         .authtoken(process.env.NGROK_AUTHTOKEN)
         .connect();
 
-      const endpoint = session.httpEndpoint().poolingEnabled(true);
+      const endpoint = session.httpEndpoint();
       if (process.env.NGROK_DOMAIN) endpoint.domain(process.env.NGROK_DOMAIN);
       const listener = await endpoint.listenAndForward(`localhost:${PORT}`);
 
@@ -138,22 +142,35 @@ const PORT = process.env.OTP_PORT || 6060;
 
     } catch (err) {
       retries++;
-      console.error(`❌ ngrok failed (attempt ${retries}/${maxRetries}): ${err.message}`);
 
-      if (err.message.includes('authtoken') || err.message.includes('auth')) {
-        console.error('🔑 Check NGROK_AUTHTOKEN matches your token at dashboard.ngrok.com');
-      }
-      if (err.message.includes('domain') || err.message.includes('hostname')) {
-        console.error('🌐 Check NGROK_DOMAIN matches a domain claimed on your ngrok account');
-      }
-
-      if (retries < maxRetries) {
-        console.log(`⏳ Retrying ngrok in 5 seconds...`);
-        await new Promise(r => setTimeout(r, 5000));
+      if (isEndpointInUse(err)) {
+        // Previous deployment is still holding the tunnel — keep waiting
+        const maxWaitRetries = 12; // 12 × 15s = 3 minutes
+        if (retries <= maxWaitRetries) {
+          console.warn(`⏳ ngrok: endpoint in use by previous deploy — waiting 15s (attempt ${retries}/${maxWaitRetries})...`);
+          await new Promise(r => setTimeout(r, 15000));
+          continue;
+        }
+        console.error('❌ ngrok: old deployment did not release endpoint after 3 minutes.');
       } else {
-        console.error('❌ ngrok failed after all retries — OTP forwarding will not work.');
-        console.log('⚠️  Bot will still run but cannot receive OTP via SMS forwarder.');
+        console.error(`❌ ngrok failed (attempt ${retries}): ${err.message}`);
+        if (err.message.includes('authtoken') || err.message.includes('auth')) {
+          console.error('🔑 Check NGROK_AUTHTOKEN matches your token at dashboard.ngrok.com');
+        }
+        if (err.message.includes('domain') || err.message.includes('hostname')) {
+          console.error('🌐 Check NGROK_DOMAIN matches a domain claimed on your ngrok account');
+        }
+        // Non-retriable error — give up after 3 attempts
+        if (retries < 3) {
+          console.log(`⏳ Retrying ngrok in 5 seconds...`);
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
       }
+
+      console.error('❌ ngrok failed after all retries — OTP forwarding will not work.');
+      console.log('⚠️  Bot will still run but cannot receive OTP via SMS forwarder.');
+      return;
     }
   }
 }
