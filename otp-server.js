@@ -52,7 +52,6 @@ app.post('/otp', (req, res) => {
     return res.json({ success: true, otp });
   } else {
     console.log('⚠️  OTP received but no script is currently waiting — discarding to avoid stale reuse');
-    // Return 200 so SMS forwarder does not keep retrying
     return res.json({ received: true, note: 'No script waiting — OTP discarded' });
   }
 });
