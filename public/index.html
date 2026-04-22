@@ -34,12 +34,7 @@
       min-height: 100vh;
     }
 
-    body::before {
-      content: '';
-      display: block;
-      height: 3px;
-      background: linear-gradient(90deg, var(--accent) 0%, rgba(255,203,0,0.2) 100%);
-    }
+    /* top accent / progress indicator — handled by JS-driven .refresh-bar */
 
     .wrap {
       max-width: 1240px;
@@ -113,7 +108,7 @@
     /* ── Stats ── */
     .stats {
       display: grid;
-      grid-template-columns: repeat(6, 1fr);
+      grid-template-columns: repeat(5, 1fr);
       gap: 14px;
       margin-bottom: 18px;
     }
@@ -445,92 +440,63 @@
       flex-shrink: 0;
     }
 
-    /* ── Airtime panel ── */
-    .airtime-panel {
+    /* ── Page-level tabs ── */
+    .page-tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: -1px; /* sit flush on panel border */
+    }
+    .page-tab {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--r);
-      padding: 16px 18px;
-      margin-bottom: 16px;
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 14px;
-    }
-    .airtime-panel-title {
-      font-size: 0.7rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+      border-bottom: none;
       color: var(--muted);
-      flex-shrink: 0;
-      margin-right: 4px;
-    }
-    /* toggle switch */
-    .toggle-wrap { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-    .toggle-label { font-size: 0.82rem; }
-    .toggle {
-      position: relative;
-      width: 40px; height: 22px;
-      flex-shrink: 0;
-    }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .toggle-slider {
-      position: absolute; inset: 0;
-      background: var(--border);
-      border-radius: 22px;
+      padding: 7px 18px;
+      border-radius: 8px 8px 0 0;
       cursor: pointer;
-      transition: background 0.2s;
-    }
-    .toggle-slider::before {
-      content: '';
-      position: absolute;
-      width: 16px; height: 16px;
-      left: 3px; top: 3px;
-      background: #fff;
-      border-radius: 50%;
-      transition: transform 0.2s;
-    }
-    .toggle input:checked + .toggle-slider { background: var(--accent); }
-    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
-
-    /* time window inputs */
-    .airtime-window {
-      display: flex; align-items: center; gap: 7px; flex-shrink: 0;
-      font-size: 0.82rem; color: var(--muted);
-    }
-    .airtime-window label { color: var(--muted); font-size: 0.78rem; }
-    .time-inp {
-      width: 80px;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 5px 8px;
-      color: var(--text);
       font-size: 0.82rem;
-      outline: none;
-      transition: border-color 0.15s;
-      text-align: center;
-      color-scheme: dark;
+      font-weight: 600;
+      transition: color 0.14s, background 0.14s;
+      white-space: nowrap;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
     }
-    .time-inp:focus { border-color: var(--accent); }
-
-    /* stage chip */
-    .airtime-stage {
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      padding: 3px 10px;
-      border-radius: 20px;
-      flex-shrink: 0;
-      background: rgba(148,163,184,0.1);
-      color: var(--muted);
+    .page-tab:hover { color: var(--text); }
+    .page-tab.active {
+      background: var(--surface);
+      color: var(--accent);
+      border-color: var(--border);
+      border-bottom-color: var(--surface); /* hide bottom border so it merges with panel */
+      position: relative;
+      z-index: 1;
     }
-    .airtime-stage.s-load_312_sent { background: rgba(59,130,246,0.14); color: #93c5fd; }
-    .airtime-stage.s-load_500_sent { background: rgba(249,115,22,0.14);  color: #fdba74; }
-    .airtime-stage.s-done          { background: rgba(34,197,94,0.14);   color: #86efac; }
-    .airtime-stage.s-error         { background: rgba(239,68,68,0.14);   color: #fca5a5; }
-    .airtime-stage.s-disabled      { background: rgba(148,163,184,0.06); color: #475569; }
+    .page-tab-content { display: none; }
+    .page-tab-content.active { display: block; }
+    .evd-hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
+    }
+    .evd-title { font-weight: 600; font-size: 0.88rem; }
+    .evd-status-QUEUED     { color: #93c5fd; }
+    .evd-status-PROCESSING { color: #fde68a; }
+    .evd-status-COMPLETED  { color: #86efac; }
+    .evd-status-FAILED     { color: #fca5a5; }
+    .evd-time-inp {
+      background: var(--card);
+      border: 1px solid var(--border);
+      color: var(--fg);
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 0.78rem;
+      width: 88px;
+    }
+    .evd-time-inp:focus { outline: none; border-color: var(--accent); }
 
     .btn.btn-save { border-color: var(--accent); color: var(--accent); }
     .btn.btn-save:hover { background: rgba(255,203,0,0.08); }
@@ -594,9 +560,101 @@
     }
     .modal-result.ok  { display: block; background: rgba(34,197,94,0.12);  border: 1px solid rgba(34,197,94,0.3);  color: #86efac; }
     .modal-result.err { display: block; background: rgba(239,68,68,0.12);  border: 1px solid rgba(239,68,68,0.3);  color: #fca5a5; }
+
+    /* ── Auto-refresh progress bar ── */
+    .refresh-bar {
+      position: fixed;
+      top: 0; left: 0;
+      height: 3px;
+      width: 100%;
+      background: linear-gradient(90deg, var(--accent) 0%, rgba(255,203,0,0.35) 100%);
+      transform-origin: left;
+      transition: width 1s linear;
+      z-index: 3000;
+      box-shadow: 0 0 8px rgba(255,203,0,0.45);
+      pointer-events: none;
+    }
+
+    /* ── Card hover elevation ── */
+    .card {
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }
+    .card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 28px rgba(0,0,0,0.38);
+      border-color: #4a5c76;
+    }
+    .card.accent:hover {
+      border-color: rgba(255,203,0,0.7);
+      box-shadow: 0 8px 28px rgba(255,203,0,0.08);
+    }
+
+    /* ── Tab content fade-in ── */
+    @keyframes tabIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .page-tab-content.active { animation: tabIn 0.2s ease forwards; }
+
+    /* ── Detail row expand animation ── */
+    .detail-collapse {
+      overflow: hidden;
+    }
+    @keyframes detailIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .detail-row.open .detail-collapse { animation: detailIn 0.18s ease; }
+
+    /* ── Modal entry animation ── */
+    @keyframes modalIn {
+      from { transform: scale(0.96) translateY(-10px); opacity: 0; }
+      to   { transform: scale(1)   translateY(0);      opacity: 1; }
+    }
+    .overlay.open .modal { animation: modalIn 0.18s cubic-bezier(0.34, 1.2, 0.64, 1); }
+
+    /* ── Next-strip + banner slide-in ── */
+    @keyframes stripIn {
+      from { opacity: 0; transform: translateY(-5px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .next-strip.visible { animation: stripIn 0.2s ease; }
+    .banner.info, .banner.warn, .banner.error { animation: stripIn 0.2s ease; }
+
+    /* ── Button active press ── */
+    .btn:active:not(:disabled) { transform: scale(0.97); }
+
+    /* ── Custom scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4f607a; }
+
+    /* ── Table row expand chevron ── */
+    .row-chevron {
+      display: inline-block;
+      transition: transform 0.18s ease;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .detail-row.open + * .row-chevron,
+    .row-chevron.open { transform: rotate(180deg); }
+
+    /* ── Mobile improvements ── */
+    @media (max-width: 640px) {
+      .airtime-panel { flex-direction: column; align-items: flex-start; }
+      .airtime-window { flex-wrap: wrap; }
+      .hdr-right { gap: 6px; }
+      .brand-name { font-size: 1rem; }
+      .page-tab { padding: 6px 13px; font-size: 0.78rem; }
+      .stats { gap: 10px; }
+      .modal { padding: 18px 16px; }
+      .wrap { padding: 18px 12px 32px; }
+    }
   </style>
 </head>
 <body>
+<div class="refresh-bar" id="refreshBar"></div>
 <div class="wrap">
 
   <!-- Header -->
@@ -643,12 +701,6 @@
     </div>
 
     <div class="card">
-      <div class="card-lbl">Airtime Loaded</div>
-      <div class="card-val" id="airtimeVal">—</div>
-      <div class="card-sub" id="airtimeSub">Loader disabled</div>
-    </div>
-
-    <div class="card">
       <div class="card-lbl">System Health</div>
       <div class="card-val" style="font-size:0.88rem;padding-top:5px">
         <span style="display:flex;align-items:center;gap:7px">
@@ -670,32 +722,8 @@
     <span class="next-strip-size" id="nextSize"></span>
   </div>
 
-  <!-- Airtime loader control panel -->
-  <div class="airtime-panel" id="airtimePanel">
-    <span class="airtime-panel-title">Airtime Loader</span>
-
-    <div class="toggle-wrap">
-      <label class="toggle" title="Enable / disable airtime loading after bundle purchase">
-        <input type="checkbox" id="airtimeToggle" onchange="saveAirtimeSettings()" />
-        <span class="toggle-slider"></span>
-      </label>
-      <span class="toggle-label" id="airtimeToggleLabel">Disabled</span>
-    </div>
-
-    <div class="airtime-window">
-      <label for="airtimeStart">UTC window</label>
-      <input class="time-inp" id="airtimeStart" type="time" value="00:00" title="Start time (UTC)" />
-      <span>–</span>
-      <input class="time-inp" id="airtimeEnd"   type="time" value="23:59" title="End time (UTC)" />
-      <span>UTC</span>
-      <button class="btn btn-save" id="airtimeSaveBtn" onclick="saveAirtimeSettings()">Save</button>
-    </div>
-
-    <span class="airtime-stage s-disabled" id="airtimeStage">idle</span>
-  </div>
-
   <!-- Search -->
-  <div class="search-card">
+  <div class="search-card" id="fileSearchCard">
     <div class="search-row">
       <input
         class="sinp"
@@ -711,36 +739,92 @@
     <div class="search-hint" id="hint"></div>
   </div>
 
-  <!-- Files panel -->
-  <div class="panel">
-    <div class="panel-hdr">
-      <span class="panel-title">Files <span class="num-badge" id="totalBadge">0</span></span>
-      <div class="tabs">
-        <button class="tab active" data-f="ALL"       onclick="setTab(this)">All</button>
-        <button class="tab"        data-f="PENDING"   onclick="setTab(this)">Pending</button>
-        <button class="tab"        data-f="ACTIVE"    onclick="setTab(this)">Active</button>
-        <button class="tab"        data-f="DONE"      onclick="setTab(this)">Done</button>
-        <button class="tab"        data-f="FAILED"    onclick="setTab(this)">Failed</button>
+  <!-- Page-level tabs -->
+  <div class="page-tabs">
+    <button class="page-tab active" id="ptFiles" onclick="setPageTab('files')">
+      📂 Files <span class="num-badge" id="totalBadge">0</span>
+    </button>
+    <button class="page-tab" id="ptEvd" onclick="setPageTab('evd')">
+      💸 EVD Airtime <span class="num-badge" id="evdBadge">0</span>
+    </button>
+  </div>
+
+  <!-- Files tab -->
+  <div class="page-tab-content active" id="tabFiles">
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">Files</span>
+        <div class="tabs">
+          <button class="tab active" data-f="ALL"       onclick="setTab(this)">All</button>
+          <button class="tab"        data-f="PENDING"   onclick="setTab(this)">Pending</button>
+          <button class="tab"        data-f="ACTIVE"    onclick="setTab(this)">Active</button>
+          <button class="tab"        data-f="DONE"      onclick="setTab(this)">Done</button>
+          <button class="tab"        data-f="FAILED"    onclick="setTab(this)">Failed</button>
+        </div>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:36px">#</th>
+              <th>Status</th>
+              <th>Filename</th>
+              <th>Allocation</th>
+              <th>Order ID(s)</th>
+              <th>Queued</th>
+              <th>Completed</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="8" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
-    <div class="tbl-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th style="width:36px">#</th>
-            <th>Status</th>
-            <th>Filename</th>
-            <th>Allocation</th>
-            <th>Order ID(s)</th>
-            <th>Queued</th>
-            <th>Completed</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody id="tbody">
-          <tr><td colspan="8" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
-        </tbody>
-      </table>
+  </div>
+
+  <!-- EVD Airtime tab -->
+  <div class="page-tab-content" id="tabEvd">
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">EVD Airtime Orders</span>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span id="evdAutoStatus" style="font-size:0.75rem;padding:3px 8px;border-radius:4px;display:none"></span>
+          <button id="evdAutoToggleBtn" onclick="evdToggleAuto()" style="font-size:0.78rem;padding:5px 12px;display:none" class="btn"></button>
+          <span id="evdAccounts" style="font-size:0.75rem;color:var(--muted)"></span>
+          <button class="btn" id="evdSendBtn" onclick="evdSendAll()" style="font-size:0.78rem;padding:5px 12px">💸 Send Airtime</button>
+        </div>
+      </div>
+      <div class="tbl-wrap">
+        <!-- time-window settings row (shown when authenticated) -->
+        <div id="evdWindowRow" style="display:none;align-items:center;gap:8px;font-size:0.78rem;padding:9px 18px;border-bottom:1px solid var(--border);flex-wrap:wrap">
+          <span style="color:var(--muted)">⏰ Active window (UTC):</span>
+          <input type="time" id="evdStartTime" class="evd-time-inp" title="Start time (UTC)">
+          <span style="color:var(--muted)">to</span>
+          <input type="time" id="evdEndTime" class="evd-time-inp" title="End time (UTC)">
+          <button class="btn btn-save" onclick="evdSaveWindow()" style="font-size:0.75rem;padding:3px 10px">Save</button>
+          <span id="evdWindowMsg" style="font-size:0.75rem"></span>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Order #</th>
+              <th>Account</th>
+              <th>Phone</th>
+              <th>Network</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Ref</th>
+              <th>Sent</th>
+              <th>Completed</th>
+            </tr>
+          </thead>
+          <tbody id="evdTbody">
+            <tr><td colspan="9" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -786,10 +870,12 @@
 'use strict';
 
 /* ── State ───────────────────────────────── */
-let allFiles  = [];
-let tabFilter = 'ALL';
-let cdSecs    = 30;
-let cdTimer   = null;
+let allFiles       = [];
+let tabFilter      = 'ALL';
+let cdSecs         = 30;
+let cdTimer        = null;
+let _lastSummaryFP = null; // fingerprint of last rendered summary
+let _searchDebounce = null;
 
 /* ── Formatting ──────────────────────────── */
 function fmtMB(mb) {
@@ -870,6 +956,18 @@ async function fetchSummary() {
   const r = await fetch('/summary');
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
+}
+
+// Fast fingerprint — detects any change in file statuses or counts.
+// Skips expensive DOM rebuild when 30s auto-refresh returns identical data.
+function summaryFingerprint(d) {
+  if (!d || !d.files) return '';
+  return [
+    d.balance?.mb, d.balance?.checkedAt,
+    d.queue?.total, d.queue?.active, d.queue?.done, d.queue?.failed,
+    d.purchase?.status,
+    d.files.map(f => f.filename + f.status + (f.completedAt||'') + (f.queuePosition??'')).join('|')
+  ].join(':');
 }
 
 /* ── Render stats cards ──────────────────── */
@@ -1034,7 +1132,7 @@ function renderTable(files, q) {
     const details = detailRows.map(([k, v]) => `<div class="detail-item"><strong>${k}</strong>${esc(v)}</div>`).join('');
 
     return `
-    <tr class="${isNext ? 'row-next' : ''}" onclick="toggleDetail('${detId}')">
+    <tr class="${isNext ? 'row-next' : ''}" onclick="toggleDetail('${detId}')" id="row-${detId}">
       <td>${qposHtml}</td>
       <td>${badge(status)}</td>
       <td><span class="fname" title="${esc(f.filename)}">${hl(dn, q)}</span></td>
@@ -1042,17 +1140,21 @@ function renderTable(files, q) {
       <td>${pillsHtml}</td>
       <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(f.queuedAt))}</td>
       <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(completedIso))}</td>
-      <td style="color:var(--muted);font-size:0.75rem;padding-right:12px">▾</td>
+      <td style="color:var(--muted);font-size:0.75rem;padding-right:12px"><span class="row-chevron" id="chev-${detId}">&#9660;</span></td>
     </tr>
     <tr class="detail-row" id="${detId}">
-      <td colspan="8"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button></div></div></td>
+      <td colspan="8"><div class="detail-collapse"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button></div></div></div></td>
     </tr>`;
   }).join('');
 }
 
 function toggleDetail(id) {
-  const el = document.getElementById(id);
-  if (el) el.classList.toggle('open');
+  const el   = document.getElementById(id);
+  const chev = document.getElementById('chev-' + id);
+  if (!el) return;
+  const opening = !el.classList.contains('open');
+  el.classList.toggle('open');
+  if (chev) chev.classList.toggle('open', opening);
 }
 
 /* ── Filter & search ─────────────────────── */
@@ -1127,7 +1229,10 @@ function applyView() {
   renderTable(list, q);
 }
 
-function onSearch() { applyView(); }
+function onSearch() {
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(applyView, 150);
+}
 
 function clearSearch() {
   document.getElementById('sinp').value = '';
@@ -1147,14 +1252,18 @@ async function doRefresh() {
   const icon = document.getElementById('rIcon');
   btn.disabled = true;
   icon.innerHTML = '<span class="spin" style="width:11px;height:11px;border-width:2px"></span>';
+  // progress bar: snap to 0 while loading
+  const bar = document.getElementById('refreshBar');
+  if (bar) { bar.style.transition = 'none'; bar.style.width = '0%'; }
 
   try {
     const d = await fetchSummary();
+    const fp = summaryFingerprint(d);
+    const changed = fp !== _lastSummaryFP;
+    _lastSummaryFP = fp;
     if (d.files) allFiles = d.files;
     renderStats(d);
-    applyView();
-    if (d.airtime) applyAirtimeState(d.airtime);
-
+    if (changed) applyView(); // skip full table rebuild if nothing changed
     const t = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
     document.getElementById('ts').textContent = `Updated ${t}`;
   } catch (e) {
@@ -1165,6 +1274,13 @@ async function doRefresh() {
   btn.disabled    = false;
   icon.textContent = '↻';
   cdSecs = 30;
+  // restore progress bar to full, then re-enable linear transition
+  const barEl = document.getElementById('refreshBar');
+  if (barEl) {
+    barEl.style.transition = 'none';
+    barEl.style.width = '100%';
+    setTimeout(() => { barEl.style.transition = 'width 1s linear'; }, 60);
+  }
 }
 
 /* ── Countdown ───────────────────────────── */
@@ -1172,102 +1288,12 @@ function startCountdown() {
   clearInterval(cdTimer);
   cdTimer = setInterval(() => {
     cdSecs--;
+    setProgressBar(cdSecs / 30);
     if (cdSecs <= 0) {
       cdSecs = 30;
       doRefresh();
     }
   }, 1000);
-}
-
-/* ── Airtime ────────────────────────────── */
-async function loadAirtimeStatus() {
-  try {
-    const r = await fetch('/airtime/status');
-    if (!r.ok) return;
-    const { airtime } = await r.json();
-    applyAirtimeState(airtime);
-  } catch {}
-}
-
-function applyAirtimeState(a) {
-  if (!a) return;
-  const toggle = document.getElementById('airtimeToggle');
-  const label  = document.getElementById('airtimeToggleLabel');
-  const stage  = document.getElementById('airtimeStage');
-  const start  = document.getElementById('airtimeStart');
-  const end    = document.getElementById('airtimeEnd');
-
-  toggle.checked    = !!a.enabled;
-  label.textContent = a.enabled ? 'Enabled' : 'Disabled';
-  const _normWin   = v => (v == null ? null : v <= 24 ? v * 60 : v);
-  const _minsToTime = m => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-  start.value = _minsToTime(_normWin(a.windowStart) ?? 0);
-  end.value   = _minsToTime(Math.min(_normWin(a.windowEnd) ?? 1439, 1439));
-
-  const s = a.enabled ? (a.stage || 'idle') : 'disabled';
-  stage.textContent = s.replace(/_/g, ' ');
-  stage.className   = `airtime-stage s-${s}`;
-
-  // ── Airtime Loaded tile ──
-  const airtimeVal = document.getElementById('airtimeVal');
-  const airtimeSub = document.getElementById('airtimeSub');
-  if (!airtimeVal) return;
-
-  const load312    = a.load312Verified ? 312 : 0;
-  const load500    = a.load500TotalAdded ?? 0;
-  const totalAdded = load312 + load500;
-  const rounds     = a.load500Count     ?? 0;
-  const maxRounds  = a.load500MaxRounds ?? 9;
-  const target     = a.load500TargetGhc ?? 4500;
-  const isDone     = a.stage === 'done';
-  const isActive   = ['load_312_sent','load_312_verified','load_500_sent','load_500_processing'].includes(a.stage);
-
-  airtimeVal.textContent = totalAdded > 0 ? `GH\u00a2 ${totalAdded.toLocaleString()}` : '\u2014';
-  airtimeVal.style.color = isDone ? 'var(--green)' : isActive ? 'var(--accent)' : 'var(--text)';
-
-  if (isDone) {
-    airtimeSub.textContent = `Complete \u2014 GH\u00a2 ${totalAdded.toLocaleString()} added`;
-  } else if (totalAdded > 0) {
-    airtimeSub.textContent = `${rounds} of ${maxRounds} rounds \u00b7 GH\u00a2 ${load500.toLocaleString()} / ${target.toLocaleString()}`;
-  } else if (a.stage === 'load_312_sent') {
-    airtimeSub.textContent = 'Waiting for load_312 callback\u2026';
-  } else {
-    airtimeSub.textContent = a.enabled ? 'Idle' : 'Loader disabled';
-  }
-}
-
-async function saveAirtimeSettings() {
-  const btn     = document.getElementById('airtimeSaveBtn');
-  const enabled = document.getElementById('airtimeToggle').checked;
-  const label   = document.getElementById('airtimeToggleLabel');
-  const _timeToMins = t => { const [h, m] = (t || '00:00').split(':').map(Number); return h * 60 + (m || 0); };
-  const wStart  = _timeToMins(document.getElementById('airtimeStart').value);
-  const wEnd    = _timeToMins(document.getElementById('airtimeEnd').value) || 1440;
-
-  label.textContent = enabled ? 'Enabled' : 'Disabled';
-  btn.disabled = true;
-  btn.textContent = '…';
-
-  try {
-    const r = await fetch('/airtime/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled, windowStart: wStart, windowEnd: wEnd }),
-    });
-    const d = await r.json();
-    if (d.success) {
-      applyAirtimeState({ ...d.airtime, stage: null });
-      btn.textContent = '✓';
-      setTimeout(() => { btn.textContent = 'Save'; }, 1500);
-    } else {
-      btn.textContent = 'Error';
-      setTimeout(() => { btn.textContent = 'Save'; }, 2000);
-    }
-  } catch {
-    btn.textContent = 'Error';
-    setTimeout(() => { btn.textContent = 'Save'; }, 2000);
-  }
-  btn.disabled = false;
 }
 
 /* ── Auth ────────────────────────────────── */
@@ -1283,6 +1309,194 @@ function checkSession() {
     .then(r => r.json())
     .then(d => { if (d.authRequired && !d.authenticated) window.location.href = '/login'; })
     .catch(() => {});
+}
+
+/* ── Page tab switching ──────────────── */
+let currentPageTab = 'files';
+function setPageTab(tab) {
+  currentPageTab = tab;
+  document.getElementById('ptFiles').classList.toggle('active', tab === 'files');
+  document.getElementById('ptEvd').classList.toggle('active',   tab === 'evd');
+  document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
+  document.getElementById('tabEvd').classList.toggle('active',   tab === 'evd');
+  document.getElementById('fileSearchCard').style.display = tab === 'files' ? '' : 'none';
+  // Load EVD data lazily on first visit
+  if (tab === 'evd') { loadEvdHistory(); loadEvdAccounts(); }
+}
+
+/* ── EVD Airtime ───────────────────────────── */
+async function loadEvdHistory() {
+  try {
+    const r = await fetch('/evd/history?limit=100');
+    if (!r.ok) return;
+    const d = await r.json();
+    renderEvdTable(d.orders || []);
+    document.getElementById('evdBadge').textContent = d.total ?? (d.orders || []).length;
+  } catch {}
+}
+
+async function loadEvdAccounts() {
+  try {
+    const r = await fetch('/evd/accounts');
+    if (r.ok) {
+      const d = await r.json();
+      const el = document.getElementById('evdAccounts');
+      if (d.accounts && d.accounts.length) {
+        el.textContent = d.accounts.map(a => `Acct ${a.index}: ${a.phone} · GH¢${a.amount} ${a.network}`).join('  |  ');
+      }
+    }
+  } catch {}
+  // Load auto-loader status badge
+  try {
+    const r2 = await fetch('/evd/auto-status');
+    if (!r2.ok) return;
+    const s = await r2.json();
+    const badge  = document.getElementById('evdAutoStatus');
+    const toggle = document.getElementById('evdAutoToggleBtn');
+    if (!badge) return;
+    badge.style.display  = 'inline-block';
+    toggle.style.display = 'inline-block';
+    toggle.dataset.enabled = s.enabled ? 'true' : 'false';
+    toggle.textContent = s.enabled ? '⏹ Disable Auto' : '▶ Enable Auto';
+    toggle.style.background = s.enabled ? '#ef4444' : '#22c55e';
+    toggle.style.color = '#fff';
+    toggle.style.border = 'none';
+    if (!s.enabled) {
+      badge.textContent = '🤖 Auto: off';
+      badge.style.background = 'var(--muted)';
+      badge.style.color = '#fff';
+    } else if (s.inFlightOrder) {
+      badge.textContent = `🤖 Auto: order #${s.inFlightOrder.order_id} ${s.inFlightOrder.status}`;
+      badge.style.background = '#f59e0b';
+      badge.style.color = '#fff';
+    } else if (s.belowThreshold) {
+      badge.textContent = `🤖 Auto: buying… GH¢${(s.currentBalance??0).toFixed(2)} < GH¢${s.minBalance}`;
+      badge.style.background = '#ef4444';
+      badge.style.color = '#fff';
+    } else {
+      const win = (s.startTime && s.endTime) ? ` · ${s.startTime}–${s.endTime} UTC` : '';
+      badge.textContent = `🤖 Auto: ok GH¢${(s.currentBalance??0).toFixed(2)}${win}`;
+      badge.style.background = '#22c55e';
+      badge.style.color = '#fff';
+    }
+    // populate time-window row
+    const winRow = document.getElementById('evdWindowRow');
+    if (winRow) {
+      winRow.style.display = 'flex';
+      document.getElementById('evdStartTime').value = s.startTime || '';
+      document.getElementById('evdEndTime').value   = s.endTime   || '';
+    }
+  } catch {}
+}
+
+async function evdSaveWindow() {
+  const startTime = document.getElementById('evdStartTime').value || null;
+  const endTime   = document.getElementById('evdEndTime').value   || null;
+  const msg = document.getElementById('evdWindowMsg');
+  try {
+    const r = await fetch('/evd/auto-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startTime, endTime }),
+    });
+    const d = await r.json();
+    if (d.success) {
+      msg.textContent = '✓ Saved';
+      msg.style.color = '#86efac';
+    } else {
+      msg.textContent = d.error || 'Error';
+      msg.style.color = '#fca5a5';
+    }
+  } catch {
+    msg.textContent = 'Network error';
+    msg.style.color = '#fca5a5';
+  }
+  setTimeout(() => { if (msg) msg.textContent = ''; }, 2000);
+}
+
+async function evdSaveWindow() {
+  const startTime = document.getElementById('evdStartTime').value || null;
+  const endTime   = document.getElementById('evdEndTime').value   || null;
+  const msg = document.getElementById('evdWindowMsg');
+  try {
+    const r = await fetch('/evd/auto-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startTime, endTime }),
+    });
+    const d = await r.json();
+    if (d.success) {
+      msg.textContent = '✓ Saved';
+      msg.style.color = '#86efac';
+    } else {
+      msg.textContent = d.error || 'Error';
+      msg.style.color = '#fca5a5';
+    }
+  } catch {
+    msg.textContent = 'Network error';
+    msg.style.color = '#fca5a5';
+  }
+  setTimeout(() => { if (msg) msg.textContent = ''; }, 2000);
+}
+
+async function evdToggleAuto() {
+  const btn = document.getElementById('evdAutoToggleBtn');
+  const currentlyEnabled = btn.dataset.enabled === 'true';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/evd/auto-toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !currentlyEnabled }),
+    });
+    if (r.ok) await loadEvdAccounts(); // refresh badge + button
+  } catch {}
+  btn.disabled = false;
+}
+
+function renderEvdTable(orders) {
+  const tbody = document.getElementById('evdTbody');
+  if (!orders.length) {
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">📤 No airtime orders yet</td></tr>';
+    return;
+  }
+  const STATUS_CLS = { queued: 'QUEUED', processing: 'PROCESSING', completed: 'COMPLETED', failed: 'FAILED' };
+  tbody.innerHTML = orders.map(o => {
+    const cls = STATUS_CLS[(o.status || '').toLowerCase()] || 'QUEUED';
+    return `<tr>
+      <td style="font-family:monospace;font-size:0.78rem">${esc(String(o.order_id ?? '—'))}</td>
+      <td style="font-size:0.78rem;color:var(--muted)">Acct ${esc(String(o.account ?? 1))}</td>
+      <td style="font-family:monospace;font-size:0.78rem">${esc(o.phone ?? '—')}</td>
+      <td style="font-size:0.78rem">${esc(o.network ?? '—')}</td>
+      <td style="font-size:0.78rem;white-space:nowrap">GH¢ ${esc(String(o.paidAmount ?? o.amount ?? '—'))}</td>
+      <td class="evd-status-${cls}" style="font-size:0.75rem;font-weight:700;text-transform:uppercase">${esc((o.status || 'queued').toLowerCase())}</td>
+      <td style="font-family:monospace;font-size:0.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.ref ?? '')}">${esc(o.ref ?? '—')}</td>
+      <td style="font-size:0.77rem;color:var(--muted);white-space:nowrap">${esc(fmtDate(o.sentAt))}</td>
+      <td style="font-size:0.77rem;color:var(--muted);white-space:nowrap">${esc(fmtDate(o.completedAt))}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function evdSendAll() {
+  const btn = document.getElementById('evdSendBtn');
+  btn.disabled    = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/evd/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accountIndex: 'all' }),
+    });
+    const d = await r.json();
+    const ok = (d.results || []).filter(x => x.success).length;
+    const fail = (d.results || []).length - ok;
+    btn.textContent = fail > 0 ? `❌ ${fail} failed` : `✅ Sent`;
+    setTimeout(() => { btn.textContent = '💸 Send Airtime'; btn.disabled = false; }, 3000);
+    await loadEvdHistory();
+  } catch (err) {
+    btn.textContent = '❌ Error';
+    setTimeout(() => { btn.textContent = '💸 Send Airtime'; btn.disabled = false; }, 3000);
+  }
 }
 
 /* ── Retry Callback modal ───────────────── */
@@ -1351,8 +1565,8 @@ async function sendRetryCallback() {
 }
 
 /* ── Boot ────────────────────────────────── */
+setProgressBar(1); // start bar full; countdown will drain it
 doRefresh().then(startCountdown);
-loadAirtimeStatus();
 setInterval(checkSession, 5 * 60 * 1000);
 </script>
 </body>
