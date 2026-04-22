@@ -83,6 +83,9 @@ function isAuthenticated(req) {
 // Only used to protect the dashboard HTML page — NOT API endpoints.
 function requireAuth(req, res, next) {
   if (isAuthenticated(req)) return next();
+  // API/JSON callers get 401; browser navigation gets a redirect
+  const wantsJson = (req.headers.accept || '').includes('application/json') || req.xhr;
+  if (wantsJson) return res.status(401).json({ success: false, error: 'Session expired — please log in again' });
   res.redirect('/login');
 }
 
