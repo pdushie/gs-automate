@@ -122,12 +122,13 @@ const PORT = process.env.OTP_PORT || 6060;
 
   while (retries < maxRetries) {
     try {
-      const listener = await ngrok.forward({
-        addr: PORT,
-        authtoken: process.env.NGROK_AUTHTOKEN,
-        domain: process.env.NGROK_DOMAIN || undefined,
-        poolingEnabled: true,
-      });
+      const session = await new ngrok.SessionBuilder()
+        .authtoken(process.env.NGROK_AUTHTOKEN)
+        .connect();
+
+      const endpoint = session.httpEndpoint().poolingEnabled(true);
+      if (process.env.NGROK_DOMAIN) endpoint.domain(process.env.NGROK_DOMAIN);
+      const listener = await endpoint.listenAndForward(`localhost:${PORT}`);
 
       const publicUrl = listener.url();
       console.log(`🌍 ngrok tunnel active: ${publicUrl}`);
