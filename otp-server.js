@@ -126,6 +126,7 @@ const PORT = process.env.OTP_PORT || 6060;
         addr: PORT,
         authtoken: process.env.NGROK_AUTHTOKEN,
         domain: process.env.NGROK_DOMAIN || undefined,
+        poolingEnabled: true,
       });
 
       const publicUrl = listener.url();
