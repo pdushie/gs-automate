@@ -839,62 +839,95 @@ async function uploadFile(page, excelFile) {
       sendAlert('⚠️ MTN GroupShare — Upload Portal Error', `"${excelFile.name}" received an unexpected portal error: ${portalError}`);
     }
 
-    // Genuine navigation failure — apply retry / abandon logic
-    const currentStatus = loadStatusLog();
-    const existingNavRetry = excelFile.isMerged
-      ? (currentStatus[excelFile.name]?.retryCount || 0)
-      : (currentStatus[`${excelFile.name}_retryCount`] || 0);
-    const retryCount = existingNavRetry + 1;
-    const timedOutAt = new Date().toISOString();
-
-    if (retryCount >= MAX_FILE_RETRIES) {
-      if (excelFile.isMerged) {
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          rec.status = 'ABANDONED';
-          rec.timedOutAt = timedOutAt;
-          rec.retryCount = retryCount;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
-        sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" failed navigation ${retryCount} times. Source files re-queued: ${srcNames}`);
+    // Recovery: before marking TIMEOUT, navigate to upload-status and check whether
+    // the file already landed there. The upload button may have been clicked and the
+    // file submitted to MTN, but the browser lost the redirect. If the file is already
+    // on the status page, skip the TIMEOUT and fall through to the normal polling loop.
+    console.log(`🔍 Nav failed — checking upload-status page for "${fileName}" before marking timeout...`);
+    let recoveredToStatusPage = false;
+    try {
+      await page.goto('https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle', timeout: 20000 });
+      await page.waitForTimeout(3000); // allow table to render
+      const statusOnPage = await page.evaluate((name) => {
+        const rows = document.querySelectorAll('tr.k-master-row');
+        for (const row of rows) {
+          const cells = row.querySelectorAll('td');
+          if (cells[1] && cells[1].textContent.trim() === name) {
+            return cells[4] ? cells[4].textContent.trim() : 'FOUND';
+          }
+        }
+        return null;
+      }, fileName);
+      if (statusOnPage) {
+        console.log(`✅ "${fileName}" found on upload-status (${statusOnPage}) after nav failure — resuming polling instead of marking TIMEOUT`);
+        recoveredToStatusPage = true;
       } else {
-        updateStatusLog({
-          [excelFile.name]: 'ABANDONED',
-          [`${excelFile.name}_timedOutAt`]: timedOutAt,
-          [`${excelFile.name}_retryCount`]: retryCount,
-        });
-        sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
-        await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+        console.log(`ℹ️  "${fileName}" not found on upload-status — treating as genuine nav failure`);
       }
-      console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
-    } else {
-      if (excelFile.isMerged) {
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          rec.status = 'TIMEOUT';
-          rec.timedOutAt = timedOutAt;
-          rec.retryCount = retryCount;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
-      } else {
-        updateStatusLog({
-          [excelFile.name]: 'TIMEOUT',
-          [`${excelFile.name}_timedOutAt`]: timedOutAt,
-          [`${excelFile.name}_retryCount`]: retryCount,
-        });
-        sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
-      }
-      console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), TIMEOUT — manual resolution required`);
+    } catch (recoveryErr) {
+      console.warn(`⚠️  Recovery nav to upload-status failed: ${recoveryErr.message}`);
     }
-    return { error: true };
+
+    if (!recoveredToStatusPage) {
+      // Genuine navigation failure — apply retry / abandon logic
+      const currentStatus = loadStatusLog();
+      const existingNavRetry = excelFile.isMerged
+        ? (currentStatus[excelFile.name]?.retryCount || 0)
+        : (currentStatus[`${excelFile.name}_retryCount`] || 0);
+      const retryCount = existingNavRetry + 1;
+      const timedOutAt = new Date().toISOString();
+
+      if (retryCount >= MAX_FILE_RETRIES) {
+        if (excelFile.isMerged) {
+          withFileLock(STATUS_LOG, () => {
+            const l = loadStatusLog();
+            const rec = l[excelFile.name] || {};
+            rec.status = 'ABANDONED';
+            rec.timedOutAt = timedOutAt;
+            rec.retryCount = retryCount;
+            l[excelFile.name] = rec;
+            atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+          });
+          try { fs.unlinkSync(excelFile.fullPath); } catch {}
+          const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
+          sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" failed navigation ${retryCount} times. Source files re-queued: ${srcNames}`);
+        } else {
+          updateStatusLog({
+            [excelFile.name]: 'ABANDONED',
+            [`${excelFile.name}_timedOutAt`]: timedOutAt,
+            [`${excelFile.name}_retryCount`]: retryCount,
+          });
+          sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+          await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+        }
+        console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
+      } else {
+        if (excelFile.isMerged) {
+          withFileLock(STATUS_LOG, () => {
+            const l = loadStatusLog();
+            const rec = l[excelFile.name] || {};
+            rec.status = 'TIMEOUT';
+            rec.timedOutAt = timedOutAt;
+            rec.retryCount = retryCount;
+            l[excelFile.name] = rec;
+            atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+          });
+          try { fs.unlinkSync(excelFile.fullPath); } catch {}
+          sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
+        } else {
+          updateStatusLog({
+            [excelFile.name]: 'TIMEOUT',
+            [`${excelFile.name}_timedOutAt`]: timedOutAt,
+            [`${excelFile.name}_retryCount`]: retryCount,
+          });
+          sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
+        }
+        console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), TIMEOUT — manual resolution required`);
+      }
+      return { error: true };
+    }
+    // recoveredToStatusPage === true: fall through to PROCESSING + polling below.
+    // Page is already on upload-status; the poll loop reload will pick it up immediately.
   }
 
   if (excelFile.isMerged) {

@@ -82,7 +82,18 @@ function isAuthenticated(req) {
 
 // Only used to protect the dashboard HTML page — NOT API endpoints.
 function requireAuth(req, res, next) {
-  if (isAuthenticated(req)) return next();
+  const token = parseCookies(req)['gs_session'];
+  if (token) {
+    const expiry = _sessionStore.get(token);
+    if (expiry && Date.now() <= expiry) {
+      // Sliding window: extend the session on every authenticated request
+      _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+      res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
+      return next();
+    }
+    _sessionStore.delete(token);
+  }
+  if (!tgAuthBot || !tgAuthChatId) return next(); // auth disabled
   // API/JSON callers get 401; browser navigation gets a redirect
   const wantsJson = (req.headers.accept || '').includes('application/json') || req.xhr;
   if (wantsJson) return res.status(401).json({ success: false, error: 'Session expired — please log in again' });
@@ -704,8 +715,44 @@ app.get('/status/:filename', (req, res) => {
 });
 
 
+// Direct portal balance fetch — used by /balance?refresh=true and /summary auto-refresh.
+// Calls the MTN portal check-balance API using the saved session cookie from the bot.
+// Returns { balanceMB, balanceText, accountGhc, accountText, checkedAt } on success, null on failure.
+async function fetchFreshBalanceFromPortal() {
+  const log = loadStatusLog();
+  if (!log._portalCookieHeader) return null;
+  try {
+    const res = await fetch('https://up2u.mtn.com.gh/providers/api/check-balance', {
+      method: 'POST',
+      headers: {
+        'Accept':       'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Cookie':       log._portalCookieHeader,
+        'Origin':       'https://up2u.mtn.com.gh',
+        'Referer':      'https://up2u.mtn.com.gh/',
+        'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      body: JSON.stringify({}),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!data.success || typeof data.body?.DataBalanceMB !== 'number') return null;
+    const balanceMB    = data.body.DataBalanceMB;
+    const balanceText  = data.body.DataBalanceFormatted || `${(balanceMB / 1024).toFixed(2)} GB`;
+    const accountGhc   = typeof data.body.MainAccountBalanceCedis === 'number' ? data.body.MainAccountBalanceCedis : null;
+    const accountText  = accountGhc != null ? `GH\u00a2 ${accountGhc.toFixed(2)}` : null;
+    const checkedAt    = new Date().toISOString();
+    const updates = { _lastBalance: balanceText, _lastBalanceMB: balanceMB, _lastBalanceCheckedAt: checkedAt };
+    if (accountGhc != null) { updates._lastAccountBalance = accountGhc; updates._lastAccountBalanceText = accountText; }
+    updateStatusLog(updates);
+    _cache.statusLog.at = 0; // bust read cache so /summary picks up new values immediately
+    return { balanceMB, balanceText, accountGhc, accountText, checkedAt };
+  } catch {
+    return null;
+  }
+}
+
 // GET /balance — return current balance from status log (refreshed each bot iteration).
-// Add ?refresh=true to force an immediate balance refresh (waits up to 25s for bot to respond).
+// Add ?refresh=true to force an immediate balance refresh via direct portal API call.
 app.get('/balance', async (req, res) => {
   const wantRefresh = req.query.refresh === 'true';
 
@@ -724,80 +771,40 @@ app.get('/balance', async (req, res) => {
       balanceMB: log._lastBalanceMB || 0,
       checkedAt: log._lastBalanceCheckedAt || null,
       cacheAge,
+      fresh: false,
+    });
+  }
+
+  // Refresh path — hit the MTN portal API directly (fast, no bot dependency)
+  const fresh = await fetchFreshBalanceFromPortal();
+  if (fresh) {
+    return res.json({
+      success: true,
+      balance: fresh.balanceText,
+      balanceMB: fresh.balanceMB,
+      checkedAt: fresh.checkedAt,
       fresh: true,
     });
   }
 
-  // Slow path (?refresh=true) — signal the bot to do a real portal read
-  const requestedAt = Date.now();
-  withFileLock(STATUS_LOG, () => {
-    const statusLog = loadStatusLog();
-    saveStatusLog({ ...statusLog, _balanceRefreshRequested: true });
-  });
-
-  // Wait up to 25s for the bot to clear the flag and write a fresh reading
-  const deadline = Date.now() + 25000;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 1000));
-    const updated = loadStatusLog();
-    const checkedAt = updated._lastBalanceCheckedAt;
-    if (!updated._balanceRefreshRequested && checkedAt && new Date(checkedAt).getTime() >= requestedAt) {
-      return res.json({
-        success: true,
-        balance: updated._lastBalance || 'Unknown',
-        balanceMB: updated._lastBalanceMB || 0,
-        checkedAt: updated._lastBalanceCheckedAt,
-        fresh: true,
-      });
-    }
-  }
-
-  // Bot did not respond in time — clear the stale flag and return current estimate
-  withFileLock(STATUS_LOG, () => {
-    const s = loadStatusLog();
-    if (s._balanceRefreshRequested) {
-      saveStatusLog({ ...s, _balanceRefreshRequested: false });
-    }
-  });
-
+  // Portal API unavailable — fall back to cached value
   const final = loadStatusLog();
-
-  // Work out what the bot is currently doing
-  const uploaded = loadUploadedLog();
-  const folderPath = process.env.EXCEL_FOLDER_PATH;
-  let busyFile = null;
-  let busyStatus = null;
-  try {
-    const files = fs.readdirSync(folderPath).filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
-    for (const f of files) {
-      const st = uploaded.includes(f) ? 'DONE' : (final[f] || 'PENDING');
-      if (st === 'IN_PROGRESS' || st === 'PROCESSING') {
-        busyFile = f;
-        busyStatus = st;
-        break;
-      }
-    }
-  } catch {}
-
-  let cacheAge = null;
+  let cacheAge2 = null;
   if (final._lastBalanceCheckedAt) {
-    const ageMs = Date.now() - new Date(final._lastBalanceCheckedAt).getTime();
-    const ageMins = Math.round(ageMs / 60000);
-    cacheAge = ageMins < 1 ? 'less than a minute ago' : `${ageMins} minute${ageMins === 1 ? '' : 's'} ago`;
+    const ageMs2 = Date.now() - new Date(final._lastBalanceCheckedAt).getTime();
+    const ageMins2 = Math.round(ageMs2 / 60000);
+    cacheAge2 = ageMins2 < 1 ? 'less than a minute ago' : `${ageMins2} minute${ageMins2 === 1 ? '' : 's'} ago`;
   }
-
-  const note = busyFile
-    ? `Bot is busy processing "${busyFile}" (${busyStatus}) and cannot navigate away to refresh balance. Last known value is from ${cacheAge || 'an earlier check'}.`
-    : `Bot did not respond within 25 s. Last known value is from ${cacheAge || 'an earlier check'}. Try again shortly.`;
+  const noteStr = 'Portal API unavailable (session may have expired). Showing last known value' + (cacheAge2 ? ` from ${cacheAge2}` : '') + '.';
 
   return res.json({
     success: true,
     balance: final._lastBalance || 'Unknown',
     balanceMB: final._lastBalanceMB || 0,
     checkedAt: final._lastBalanceCheckedAt || null,
-    cacheAge,
+    cacheAge: cacheAge2,
     fresh: false,
-    note,
+    note: noteStr,
   });
 });
 
@@ -1020,6 +1027,12 @@ app.get('/summary', requireAuth, (req, res) => {
   const statusLog = loadStatusLog();
   const disk      = getDiskUsage();
 
+  // Auto-refresh balance if cache is stale (> 2 min) — avoids waiting for the bot
+  const BALANCE_STALE_MS = 2 * 60 * 1000;
+  if (!statusLog._lastBalanceCheckedAt || Date.now() - new Date(statusLog._lastBalanceCheckedAt).getTime() > BALANCE_STALE_MS) {
+    fetchFreshBalanceFromPortal().catch(() => {}); // fire-and-forget; result is in status log
+  }
+
   let files;
   try {
     files = fs.readdirSync(folderPath)
@@ -1163,9 +1176,11 @@ function upsertEvdOrder(order) {
   // Strip undefined values so partial updates (e.g. callbacks missing some fields)
   // do not overwrite existing good data with undefined.
   const clean = Object.fromEntries(Object.entries(order).filter(([, v]) => v !== undefined));
+  // Normalise order_id to string so numeric send-response IDs match string callback IDs
+  if (clean.order_id != null) clean.order_id = String(clean.order_id);
   withFileLock(EVD_LOG, () => {
     const orders = loadEvdLog();
-    const idx = orders.findIndex(o => o.order_id === clean.order_id);
+    const idx = orders.findIndex(o => String(o.order_id) === clean.order_id);
     if (idx >= 0) {
       orders[idx] = { ...orders[idx], ...clean };
     } else {
@@ -1385,9 +1400,10 @@ app.get('/evd/auto-status', (req, res) => {
     pollMins,
     startTime,
     endTime,
-    currentBalance: ghcBalance,
-    belowThreshold: ghcBalance != null && ghcBalance < minBalance,
-    inFlightOrder:  inFlight ? { order_id: inFlight.order_id, status: inFlight.status } : null,
+    currentBalance:     ghcBalance,
+    balanceUnknown:     ghcBalance == null,
+    belowThreshold:     ghcBalance != null && ghcBalance < minBalance,
+    inFlightOrder:      inFlight ? { order_id: inFlight.order_id, status: inFlight.status } : null,
   });
 });
 
@@ -1452,7 +1468,47 @@ async function runEvdAutoLoader() {
 
   const minBalance = parseFloat(process.env.EVD_AUTO_MIN_BALANCE_GHC || '20');
   const log        = loadStatusLog();
-  const ghcBalance = log._lastAccountBalance;
+  let ghcBalance   = null;
+
+  // Always fetch a fresh GHC balance directly from the MTN portal API.
+  // This avoids any stale/missing _lastAccountBalance issues.
+  if (log._portalCookieHeader) {
+    try {
+      const balRes = await fetch('https://up2u.mtn.com.gh/providers/api/check-balance', {
+        method: 'POST',
+        headers: {
+          'Accept':       'application/json, text/plain, */*',
+          'Content-Type': 'application/json',
+          'Cookie':       log._portalCookieHeader,
+          'Origin':       'https://up2u.mtn.com.gh',
+          'Referer':      'https://up2u.mtn.com.gh/',
+          'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        body: JSON.stringify({}),
+      });
+      const balData = await balRes.json().catch(() => ({}));
+      if (balData.success && typeof balData.body?.MainAccountBalanceCedis === 'number') {
+        ghcBalance = balData.body.MainAccountBalanceCedis;
+        updateStatusLog({
+          _lastAccountBalance:     ghcBalance,
+          _lastAccountBalanceText: `GH¢ ${ghcBalance.toFixed(2)}`,
+        });
+        console.log(`🤖 EVD auto-loader: GHC balance = GH¢ ${ghcBalance.toFixed(2)}`);
+      } else {
+        console.warn(`🤖 EVD auto-loader: balance API returned unexpected response — falling back to cached value`);
+        ghcBalance = log._lastAccountBalance ?? null;
+      }
+    } catch (fetchErr) {
+      console.warn(`🤖 EVD auto-loader: balance fetch failed (${fetchErr.message}) — falling back to cached value`);
+      ghcBalance = log._lastAccountBalance ?? null;
+    }
+  } else {
+    // No cookie yet (bot hasn't logged in) — fall back to whatever is cached
+    ghcBalance = log._lastAccountBalance ?? null;
+    if (ghcBalance != null) {
+      console.log(`🤖 EVD auto-loader: no portal cookie yet — using cached GHC balance GH¢ ${ghcBalance.toFixed(2)}`);
+    }
+  }
 
   // Can't evaluate without a known GHC balance
   if (ghcBalance == null) {

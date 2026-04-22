@@ -1373,6 +1373,10 @@ async function loadEvdAccounts() {
       badge.textContent = '🤖 Auto: off';
       badge.style.background = 'var(--muted)';
       badge.style.color = '#fff';
+    } else if (s.balanceUnknown) {
+      badge.textContent = '🤖 Auto: balance unknown';
+      badge.style.background = '#6366f1';
+      badge.style.color = '#fff';
     } else if (s.inFlightOrder) {
       badge.textContent = `🤖 Auto: order #${s.inFlightOrder.order_id} ${s.inFlightOrder.status}`;
       badge.style.background = '#f59e0b';
