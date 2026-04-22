@@ -562,29 +562,34 @@ async function checkBalance(page, context) {
 }
 
 function _parseExcelTotalMB(filePath) {
-  const workbook = XLSX.readFile(filePath);
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+  try {
+    const workbook = XLSX.readFile(filePath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-  const headerRow = rawRows[0];
-  const dataMBColIndex = 3;
+    const headerRow = rawRows[0];
+    const dataMBColIndex = 3;
 
-  console.log(`📊 Using column: "${headerRow[dataMBColIndex]}" (column 4)`);
+    console.log(`📊 Using column: "${headerRow ? headerRow[dataMBColIndex] : 'unknown'}" (column 4)`);
 
-  let totalMB = 0;
-  let rowCount = 0;
+    let totalMB = 0;
+    let rowCount = 0;
 
-  for (let r = 1; r < rawRows.length; r++) {
-    const val = parseFloat(rawRows[r][dataMBColIndex]) || 0;
-    if (val > 0) {
-      totalMB += val;
-      rowCount++;
+    for (let r = 1; r < rawRows.length; r++) {
+      const val = parseFloat(rawRows[r][dataMBColIndex]) || 0;
+      if (val > 0) {
+        totalMB += val;
+        rowCount++;
+      }
     }
-  }
 
-  console.log(`📊 File: ${path.basename(filePath)}`);
-  console.log(`📊 Rows: ${rowCount} | Total required: ${totalMB.toFixed(2)} MB (${(totalMB / 1024).toFixed(2)} GB)`);
-  return totalMB;
+    console.log(`📊 File: ${path.basename(filePath)}`);
+    console.log(`📊 Rows: ${rowCount} | Total required: ${totalMB.toFixed(2)} MB (${(totalMB / 1024).toFixed(2)} GB)`);
+    return totalMB;
+  } catch (err) {
+    console.error(`❌ Failed to parse XLSX "${path.basename(filePath)}": ${err.message} — treating as 0 MB`);
+    return 0;
+  }
 }
 
 // Returns cached totalMB for a file if the file hasn't changed (mtime match),

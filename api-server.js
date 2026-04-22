@@ -474,7 +474,7 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
   withFileLock(STATUS_LOG, () => {
     const log = loadStatusLog();
-    saveStatusLog({ ...log, _fileReceived: true });
+    saveStatusLog({ ...log, _fileReceived: true, [`${req.file.filename}_queuedAt`]: new Date().toISOString() });
   });
   console.log(`📥 API received file: ${req.file.filename}`);
   res.json({
@@ -520,7 +520,7 @@ app.post('/upload-base64', (req, res) => {
     console.log(`📥 API received base64 file: ${savedName}`);
 
     // Persist order reference(s) and wake the idle bot
-    const orderMeta = { _fileReceived: true };
+    const orderMeta = { _fileReceived: true, [`${savedName}_queuedAt`]: new Date().toISOString() };
     if (Array.isArray(orderIds) && orderIds.length > 0) {
       orderMeta[`${savedName}_orderIds`] = orderIds;
     } else if (orderId) {
