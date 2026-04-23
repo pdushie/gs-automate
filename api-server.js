@@ -10,6 +10,10 @@ const crypto      = require('crypto');
 const compression = require('compression');
 const TelegramBot = require('node-telegram-bot-api');
 
+// Log unhandled errors instead of silently crashing — start.js will restart the process.
+process.on('uncaughtException',  (err) => console.error('💥 Uncaught exception:', err));
+process.on('unhandledRejection', (err) => console.error('💥 Unhandled rejection:', err));
+
 
 const app = express();
 app.use(compression()); // gzip all JSON + HTML responses
@@ -1478,25 +1482,29 @@ app.get('/evd/auto-status', (req, res) => {
   });
 });
 
-// POST /evd/cancel-stuck — mark all queued/processing/pending orders as 'cancelled'.
+// POST /evd/cancel-stuck — mark queued/processing/pending orders as 'cancelled'.
+// Only cancels orders whose sentAt is older than MIN_STUCK_AGE_MS (default 20 min)
+// so legitimately slow orders (high-demand days can take ~10 min) are not disturbed.
 // Clears the in-flight guard so the auto-loader can run immediately.
 app.post('/evd/cancel-stuck', (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const MIN_STUCK_AGE_MS = 20 * 60 * 1000; // only cancel if queued for > 20 min
   const STUCK = ['queued', 'processing', 'pending'];
   let count = 0;
+  let skipped = 0;
   withFileLock(EVD_LOG, () => {
     let orders = loadEvdLog();
     orders = orders.map(o => {
-      if (STUCK.includes((o.status || '').toLowerCase())) {
-        count++;
-        return { ...o, status: 'cancelled', completedAt: new Date().toISOString() };
-      }
-      return o;
+      if (!STUCK.includes((o.status || '').toLowerCase())) return o;
+      const ageMs = o.sentAt ? Date.now() - new Date(o.sentAt).getTime() : Infinity;
+      if (ageMs < MIN_STUCK_AGE_MS) { skipped++; return o; } // too recent — leave it alone
+      count++;
+      return { ...o, status: 'cancelled', completedAt: new Date().toISOString() };
     });
     saveEvdLog(orders);
   });
-  console.log(`✏️  EVD cancel-stuck: ${count} order(s) marked cancelled`);
-  return res.json({ success: true, cancelled: count });
+  console.log(`✏️  EVD cancel-stuck: ${count} cancelled, ${skipped} skipped (< 20 min old)`);
+  return res.json({ success: true, cancelled: count, skipped });
 });
 
 // POST /evd/auto-toggle — enable or disable the auto-loader from the UI.

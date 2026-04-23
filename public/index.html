@@ -1498,7 +1498,13 @@ async function evdCancelStuck() {
     const r = await fetch('/evd/cancel-stuck', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
     const d = await r.json();
     if (d.success) {
-      btn.textContent = `✓ Cancelled ${d.cancelled}`;
+      if (d.cancelled === 0 && d.skipped > 0) {
+        btn.textContent = `⏳ ${d.skipped} order(s) still processing (<20 min)`;
+      } else if (d.skipped > 0) {
+        btn.textContent = `✓ Cancelled ${d.cancelled}, kept ${d.skipped} recent`;
+      } else {
+        btn.textContent = `✓ Cancelled ${d.cancelled}`;
+      }
       setTimeout(() => loadEvdHistory(), 800);
       setTimeout(() => loadEvdAccounts(), 900);
     } else {
@@ -1507,7 +1513,7 @@ async function evdCancelStuck() {
   } catch {
     btn.textContent = '✗ Error';
   }
-  setTimeout(() => { btn.textContent = '🚫 Cancel Stuck'; btn.disabled = false; }, 3000);
+  setTimeout(() => { btn.textContent = '🚫 Cancel Stuck'; btn.disabled = false; }, 4000);
 }
 
 async function evdSendAll() {
