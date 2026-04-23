@@ -1456,7 +1456,14 @@ app.get('/evd/auto-status', (req, res) => {
   const log        = loadStatusLog();
   const ghcBalance = log._lastAccountBalance ?? null;
   const orders     = loadEvdLog();
-  const inFlight   = orders.find(o => { const s = (o.status||'').toLowerCase(); return s==='queued'||s==='processing'||s==='pending'; });
+  // Use latest status per order_id (orders array is newest-first)
+  const latestByOrderId = new Map();
+  for (const o of orders) {
+    const id = o.order_id != null ? String(o.order_id) : null;
+    if (!id || latestByOrderId.has(id)) continue;
+    latestByOrderId.set(id, o);
+  }
+  const inFlight = [...latestByOrderId.values()].find(o => { const s = (o.status||'').toLowerCase(); return s==='queued'||s==='processing'||s==='pending'; });
   return res.json({
     success: true,
     enabled,
@@ -1469,6 +1476,27 @@ app.get('/evd/auto-status', (req, res) => {
     belowThreshold:     ghcBalance != null && ghcBalance < minBalance,
     inFlightOrder:      inFlight ? { order_id: inFlight.order_id, status: inFlight.status } : null,
   });
+});
+
+// POST /evd/cancel-stuck — mark all queued/processing/pending orders as 'cancelled'.
+// Clears the in-flight guard so the auto-loader can run immediately.
+app.post('/evd/cancel-stuck', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const STUCK = ['queued', 'processing', 'pending'];
+  let count = 0;
+  withFileLock(EVD_LOG, () => {
+    let orders = loadEvdLog();
+    orders = orders.map(o => {
+      if (STUCK.includes((o.status || '').toLowerCase())) {
+        count++;
+        return { ...o, status: 'cancelled', completedAt: new Date().toISOString() };
+      }
+      return o;
+    });
+    saveEvdLog(orders);
+  });
+  console.log(`✏️  EVD cancel-stuck: ${count} order(s) marked cancelled`);
+  return res.json({ success: true, cancelled: count });
 });
 
 // POST /evd/auto-toggle — enable or disable the auto-loader from the UI.

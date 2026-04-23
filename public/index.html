@@ -793,6 +793,7 @@
           <span id="evdAutoStatus" style="font-size:0.75rem;padding:3px 8px;border-radius:4px;display:none"></span>
           <button id="evdAutoToggleBtn" onclick="evdToggleAuto()" style="font-size:0.78rem;padding:5px 12px;display:none" class="btn"></button>
           <span id="evdAccounts" style="font-size:0.75rem;color:var(--muted)"></span>
+          <button class="btn" id="evdCancelStuckBtn" onclick="evdCancelStuck()" style="font-size:0.78rem;padding:5px 12px;background:#ef4444;color:#fff;border:none" title="Mark all queued/processing orders as cancelled">🚫 Cancel Stuck</button>
           <button class="btn" id="evdSendBtn" onclick="evdSendAll()" style="font-size:0.78rem;padding:5px 12px">💸 Send Airtime</button>
         </div>
       </div>
@@ -1487,6 +1488,26 @@ function renderEvdTable(orders) {
       <td style="font-size:0.77rem;color:var(--muted);white-space:nowrap">${esc(fmtDate(o.completedAt))}</td>
     </tr>`;
   }).join('');
+}
+
+async function evdCancelStuck() {
+  const btn = document.getElementById('evdCancelStuckBtn');
+  btn.disabled    = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/evd/cancel-stuck', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const d = await r.json();
+    if (d.success) {
+      btn.textContent = `✓ Cancelled ${d.cancelled}`;
+      setTimeout(() => loadEvdHistory(), 800);
+      setTimeout(() => loadEvdAccounts(), 900);
+    } else {
+      btn.textContent = '✗ Error';
+    }
+  } catch {
+    btn.textContent = '✗ Error';
+  }
+  setTimeout(() => { btn.textContent = '🚫 Cancel Stuck'; btn.disabled = false; }, 3000);
 }
 
 async function evdSendAll() {
