@@ -1386,6 +1386,37 @@ app.get('/evd/history', (req, res) => {
   });
 });
 
+// PATCH /evd/order/:id — manually update fields on an existing order (admin use).
+// Body: { status, paidAmount, completedAt } — all optional; unknown fields ignored.
+app.patch('/evd/order/:id', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const orderId = String(req.params.id);
+  const ALLOWED = ['status', 'paidAmount', 'completedAt', 'notes'];
+  const patch   = {};
+  for (const key of ALLOWED) {
+    if (req.body[key] !== undefined) patch[key] = req.body[key];
+  }
+  if (Object.keys(patch).length === 0) {
+    return res.status(400).json({ success: false, error: 'No patchable fields provided' });
+  }
+
+  let updated = false;
+  withFileLock(EVD_LOG, () => {
+    let orders = loadEvdLog();
+    const existing = orders.find(o => String(o.order_id) === orderId);
+    if (!existing) return;
+    orders = orders.filter(o => String(o.order_id) !== orderId);
+    orders.unshift({ ...existing, ...patch });
+    saveEvdLog(orders);
+    updated = true;
+  });
+
+  if (!updated) return res.status(404).json({ success: false, error: `Order #${orderId} not found` });
+  console.log(`✏️  EVD order #${orderId} manually patched: ${JSON.stringify(patch)}`);
+  return res.json({ success: true, order_id: orderId, patch });
+});
+
 // GET /evd/accounts — list configured accounts (keys masked).
 app.get('/evd/accounts', (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
