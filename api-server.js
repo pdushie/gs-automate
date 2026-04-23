@@ -21,8 +21,9 @@ app.use(express.json({ limit: '50mb', verify: (req, _res, buf) => { req.rawBody 
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 
-const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
-const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+const UPLOADED_LOG  = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
+const STATUS_LOG    = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+const SESSION_LOG   = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.sessions.json');
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
 
 
@@ -34,10 +35,33 @@ const tgAuthChatId = process.env.TELEGRAM_CHAT_ID     || null;
 const tgAuthBot2   = process.env.TELEGRAM_BOT_TOKEN_2 ? new TelegramBot(process.env.TELEGRAM_BOT_TOKEN_2, { polling: false }) : null;
 const tgAuthChatId2 = process.env.TELEGRAM_CHAT_ID_2  || null;
 
-// In-memory stores — reset on process restart (forces re-login, no db dependency)
-const _otpStore     = new Map(); // 'global' -> { code, expiresAt, used }
-const _sessionStore = new Map(); // token     -> expiresAt
-const _rateStore    = new Map(); // ip        -> timestamps[]
+// In-memory stores
+const _otpStore   = new Map(); // 'global' -> { code, expiresAt, used }
+const _rateStore  = new Map(); // ip        -> timestamps[]
+
+// Session store — backed by disk so sessions survive process restarts / redeploys.
+const _sessionStore = new Map(); // token -> expiresAt
+
+function _persistSessions() {
+  try {
+    const obj = {};
+    const now = Date.now();
+    for (const [k, v] of _sessionStore) if (v > now) obj[k] = v; // only save valid sessions
+    fs.writeFileSync(SESSION_LOG, JSON.stringify(obj), 'utf8');
+  } catch { /* non-fatal */ }
+}
+
+// Load persisted sessions on startup, discarding any that have already expired
+try {
+  if (fs.existsSync(SESSION_LOG)) {
+    const raw = JSON.parse(fs.readFileSync(SESSION_LOG, 'utf8'));
+    const now = Date.now();
+    for (const [k, v] of Object.entries(raw)) {
+      if (v > now) _sessionStore.set(k, v);
+    }
+    console.log(`🔑 Loaded ${_sessionStore.size} active session(s) from disk`);
+  }
+} catch { /* ignore corrupt file */ }
 
 const OTP_TTL_MS     =  5 * 60 * 1000;      // 5 minutes
 const SESSION_TTL_MS = 30 * 60 * 1000;      // 30 minutes
@@ -47,7 +71,9 @@ const RATE_WIN_MS    = 15 * 60 * 1000;      // 15 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of _otpStore)     if (v.expiresAt < now) _otpStore.delete(k);
-  for (const [k, v] of _sessionStore) if (v < now)           _sessionStore.delete(k);
+  let sessionsPruned = 0;
+  for (const [k, v] of _sessionStore) if (v < now) { _sessionStore.delete(k); sessionsPruned++; }
+  if (sessionsPruned > 0) _persistSessions();
   for (const [k, ts] of _rateStore) {
     const fresh = ts.filter(t => now - t < RATE_WIN_MS);
     if (!fresh.length) _rateStore.delete(k); else _rateStore.set(k, fresh);
@@ -88,6 +114,7 @@ function requireAuth(req, res, next) {
     if (expiry && Date.now() <= expiry) {
       // Sliding window: extend the session on every authenticated request
       _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+      _persistSessions();
       res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
       return next();
     }
@@ -423,6 +450,7 @@ app.post('/auth/verify', (req, res) => {
   if (!tgAuthBot || !tgAuthChatId) {
     const token = crypto.randomBytes(32).toString('hex');
     _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+    _persistSessions();
     res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
     return res.json({ success: true });
   }
@@ -448,6 +476,7 @@ app.post('/auth/verify', (req, res) => {
   record.used = true; // single-use
   const token = crypto.randomBytes(32).toString('hex');
   _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
+  _persistSessions();
   res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
   console.log(`✅ Dashboard login — session issued (ip: ${getClientIp(req)})`);
   res.json({ success: true });
@@ -456,7 +485,7 @@ app.post('/auth/verify', (req, res) => {
 // POST /auth/logout — invalidate session cookie
 app.post('/auth/logout', (req, res) => {
   const token = parseCookies(req)['gs_session'];
-  if (token) _sessionStore.delete(token);
+  if (token) { _sessionStore.delete(token); _persistSessions(); }
   res.clearCookie('gs_session');
   res.redirect('/login');
 });
@@ -1585,8 +1614,11 @@ const API_PORT = process.env.PORT || process.env.API_PORT || 7070;
 const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${API_PORT}`;
 
 
-app.listen(API_PORT, () => {
+const server = app.listen(API_PORT, () => {
   console.log(`🚀 API server running on port ${API_PORT}`);
+  // Increase timeouts to prevent 502 Bad Gateway from reverse proxy (Render)
+  server.keepAliveTimeout = 120000; // 120s (must exceed proxy idle timeout)
+  server.headersTimeout = 125000;   // slightly above keepAliveTimeout
   console.log(`📡 Endpoints:`);
   console.log(`   POST ${PUBLIC_URL}/upload         — upload .xlsx file (multipart)`);
   console.log(`   POST ${PUBLIC_URL}/upload-base64  — upload .xlsx file (base64)`);
