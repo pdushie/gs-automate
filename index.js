@@ -22,6 +22,8 @@ function escapeHtml(str) {
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
+const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
+let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const MAX_FILE_RETRIES = parseInt(process.env.MAX_FILE_RETRIES || '5');
@@ -270,7 +272,16 @@ function parseBalanceToMB(balanceText) {
 
 async function isSessionActive(page) {
   try {
-    await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle', timeout: 15000 });
+    // Use 'load' as primary waitUntil — more forgiving than 'networkidle' on slow connections.
+    // Fall back gracefully if navigation times out (portal slow but session still valid).
+    try {
+      await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 30000 });
+    } catch (navErr) {
+      // Navigation timed out — check current URL anyway before giving up
+      if (!page.url().includes('up2u.mtn.com.gh')) throw navErr;
+      console.warn(`⚠️  Session check: navigation slow (${navErr.message}) — checking URL anyway`);
+    }
+    _lastPortalNavAt = Date.now();
     const currentUrl = page.url();
 
     if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
@@ -1303,6 +1314,19 @@ async function run() {
         idleCount++;
         const idleLog = loadStatusLog();
         const idleBalanceMB = idleLog._lastBalanceMB || 0;
+
+        // Keep-alive: reload the portal page if we haven't navigated there recently.
+        // Prevents the MTN portal from killing the browser session due to inactivity.
+        if (Date.now() - _lastPortalNavAt >= KEEP_ALIVE_INTERVAL_MS) {
+          try {
+            console.log(`🫀 Keep-alive: reloading portal page (last nav ${Math.round((Date.now() - _lastPortalNavAt) / 1000)}s ago)...`);
+            await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 30000 });
+            _lastPortalNavAt = Date.now();
+          } catch (kaErr) {
+            console.warn(`⚠️  Keep-alive reload failed: ${kaErr.message}`);
+          }
+        }
+
         console.log(`😴 [${new Date().toLocaleTimeString()}] Idle #${idleCount} — No pending files. Balance: ${idleLog._lastBalance || 'Unknown'} (${idleBalanceMB.toFixed(2)} MB). Next check in 1 min...`);
         await interruptibleSleep(IDLE_REFRESH_INTERVAL);
         continue;
