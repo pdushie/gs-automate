@@ -1208,12 +1208,16 @@ function upsertEvdOrder(order) {
   // Normalise order_id to string so numeric send-response IDs match string callback IDs
   if (clean.order_id != null) clean.order_id = String(clean.order_id);
   withFileLock(EVD_LOG, () => {
-    const orders = loadEvdLog();
-    const idx = orders.findIndex(o => String(o.order_id) === clean.order_id);
-    if (idx >= 0) {
-      orders[idx] = { ...orders[idx], ...clean };
+    let orders = loadEvdLog();
+    if (clean.order_id != null) {
+      // Remove ALL existing entries with this order_id (handles any duplicates that may
+      // have accumulated), merge the update into the first/most-recent match, then
+      // re-insert at the front so the latest state is always index 0.
+      const existing = orders.find(o => String(o.order_id) === clean.order_id);
+      orders = orders.filter(o => String(o.order_id) !== clean.order_id);
+      orders.unshift(existing ? { ...existing, ...clean } : clean);
     } else {
-      orders.unshift(clean); // newest first
+      orders.unshift(clean); // no order_id — can't deduplicate, just prepend
     }
     saveEvdLog(orders);
   });
@@ -1547,9 +1551,18 @@ async function runEvdAutoLoader() {
 
   if (ghcBalance >= minBalance) return; // balance is fine
 
-  // Check if any EVD order is still in-flight (queued / processing)
+  // Check if any EVD order is still in-flight (queued / processing).
+  // Orders array is newest-first (unshift), so build a map of the LATEST status per
+  // order_id. This avoids being blocked by stale "queued" duplicates that were
+  // already resolved by a later callback entry in the log.
   const orders = loadEvdLog();
-  const inFlight = orders.find(o => {
+  const latestByOrderId = new Map();
+  for (const o of orders) {
+    const id = o.order_id != null ? String(o.order_id) : null;
+    if (!id || latestByOrderId.has(id)) continue; // first hit = most recent
+    latestByOrderId.set(id, o);
+  }
+  const inFlight = [...latestByOrderId.values()].find(o => {
     const s = (o.status || '').toLowerCase();
     return s === 'queued' || s === 'processing' || s === 'pending';
   });
