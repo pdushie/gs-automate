@@ -116,10 +116,14 @@ function requireAuth(req, res, next) {
   if (token) {
     const expiry = _sessionStore.get(token);
     if (expiry && Date.now() <= expiry) {
-      // Sliding window: extend the session on every authenticated request
-      _sessionStore.set(token, Date.now() + SESSION_TTL_MS);
-      _persistSessions();
-      res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
+      // Sliding window: extend only if more than 1 min has elapsed since last extension
+      // to avoid a disk write on every single API poll (dashboard polls every 30s).
+      const newExpiry = Date.now() + SESSION_TTL_MS;
+      if (newExpiry - expiry > 60_000) {
+        _sessionStore.set(token, newExpiry);
+        _persistSessions();
+        res.cookie('gs_session', token, { httpOnly: true, sameSite: 'Lax', maxAge: SESSION_TTL_MS });
+      }
       return next();
     }
     _sessionStore.delete(token);
@@ -506,12 +510,14 @@ app.post('/upload', upload.single('file'), (req, res) => {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
 
-  const { totalDataGB } = getExcelStats(req.file.path);
-  const fileMB = totalDataGB != null ? totalDataGB * 1024 : 0;
+  // Warn if the cached balance suggests the file may exceed available data,
+  // but skip the XLSX parse — the bot has its own cached total and the
+  // synchronous XLSX.readFile blocks the event loop on large files.
   const statusLogNow = loadStatusLog();
+  const cachedFileMB = statusLogNow[`${req.file.filename}_totalMB`];
   const availableMBNow = statusLogNow._lastBalanceMB || 0;
-  if (fileMB > 0 && availableMBNow > 0 && fileMB > availableMBNow) {
-    const requiredGB = parseFloat((fileMB / 1024).toFixed(2));
+  if (cachedFileMB > 0 && availableMBNow > 0 && cachedFileMB > availableMBNow) {
+    const requiredGB  = parseFloat((cachedFileMB  / 1024).toFixed(2));
     const availableGB = parseFloat((availableMBNow / 1024).toFixed(2));
     console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
   }
@@ -545,7 +551,8 @@ app.post('/upload-base64', (req, res) => {
   try {
     const buffer = Buffer.from(data, 'base64');
 
-    const newFileMB = getFileTotalMBFromBuffer(buffer);
+    const newFileMB = 0; // skip synchronous XLSX parse here — bot caches _totalMB itself;
+    // avoids blocking the event loop on large files during upload.
     const statusLog = loadStatusLog();
     const availableMB = statusLog._lastBalanceMB || 0;
     if (newFileMB > 0 && availableMB > 0 && newFileMB > availableMB) {
@@ -675,21 +682,23 @@ function resolveFileStatus(filename, uploaded, statusLog) {
 // GET /status — get status of all files
 app.get('/status', (req, res) => {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
-  const uploaded = loadUploadedLog();
+  const uploaded  = loadUploadedLog();
   const statusLog = loadStatusLog();
 
   const allFiles = fs.readdirSync(folderPath)
     .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
     .map(f => {
-      const stats = getExcelStats(path.join(folderPath, f));
       const resolved = resolveFileStatus(f, uploaded, statusLog);
+      // Use the bot's cached _totalMB from the status log — avoids a synchronous
+      // XLSX.readFile() call for every file on every request.
+      const cachedMB = statusLog[`${f}_totalMB`];
       const entry = {
-        filename: f,
-        status: resolved.status,
-        queuedAt: resolved.queuedAt,
-        completedAt: resolved.completedAt,
-        totalDataGB: stats.totalDataGB,
-        rowCount: stats.rowCount,
+        filename:     f,
+        status:       resolved.status,
+        queuedAt:     resolved.queuedAt,
+        completedAt:  resolved.completedAt,
+        totalDataGB:  cachedMB != null ? parseFloat((cachedMB / 1024).toFixed(4)) : null,
+        rowCount:     statusLog[`${f}_rowCount`] || null,
       };
       if (resolved.orderIds) entry.orderIds = resolved.orderIds;
       else if (resolved.orderId) entry.orderId = resolved.orderId;
@@ -722,7 +731,7 @@ app.get('/status', (req, res) => {
 // GET /status/:filename — get status of a specific file
 app.get('/status/:filename', (req, res) => {
   const { filename } = req.params;
-  const uploaded = loadUploadedLog();
+  const uploaded  = loadUploadedLog();
   const statusLog = loadStatusLog();
 
   const filePath = path.join(process.env.EXCEL_FOLDER_PATH, filename);
@@ -730,16 +739,25 @@ app.get('/status/:filename', (req, res) => {
     return res.status(404).json({ success: false, error: 'File not found' });
   }
 
-  const stats = getExcelStats(filePath);
-  const resolved = resolveFileStatus(filename, uploaded, statusLog);
+  const resolved  = resolveFileStatus(filename, uploaded, statusLog);
+  const cachedMB  = statusLog[`${filename}_totalMB`];
+  // Fall back to live XLSX parse only for this single-file lookup if the bot
+  // hasn't cached _totalMB yet (file just uploaded, bot not yet processed it).
+  let totalDataGB = cachedMB != null ? parseFloat((cachedMB / 1024).toFixed(4)) : null;
+  let rowCount    = statusLog[`${filename}_rowCount`] || null;
+  if (totalDataGB == null) {
+    const stats = getExcelStats(filePath);
+    totalDataGB = stats.totalDataGB;
+    rowCount    = stats.rowCount;
+  }
   const entry = {
-    success: true,
+    success:     true,
     filename,
-    status: resolved.status,
-    queuedAt: resolved.queuedAt,
+    status:      resolved.status,
+    queuedAt:    resolved.queuedAt,
     completedAt: resolved.completedAt,
-    totalDataGB: stats.totalDataGB,
-    rowCount: stats.rowCount,
+    totalDataGB,
+    rowCount,
   };
   if (resolved.orderIds) entry.orderIds = resolved.orderIds;
   else if (resolved.orderId) entry.orderId = resolved.orderId;
@@ -1015,20 +1033,13 @@ app.post('/retry-callback', async (req, res) => {
 
 
 // GET /health — fast liveness probe for Render / uptime monitors.
-// Must respond in well under 5 s — deliberately does NO disk I/O.
-app.get('/health', (req, res) => {
+// Response is pre-built every 5 s by a setInterval so the handler does
+// zero work at request time — responds instantly even under heavy load.
+let _healthSnapshot = null;
+function _buildHealthSnapshot() {
   const mem = process.memoryUsage();
   const uptimeSecs = Math.floor(process.uptime());
-
-  // Cache warmth: peek at TTL without doing any I/O
-  const cacheStatus = {
-    statusLog: _cache.statusLog.at > 0 && (Date.now() - _cache.statusLog.at) < STATUS_LOG_TTL,
-    uploadedLog: _cache.uploadedLog.at > 0 && (Date.now() - _cache.uploadedLog.at) < UPLOADED_LOG_TTL,
-    diskUsage: _cache.diskUsage.at > 0 && (Date.now() - _cache.diskUsage.at) < DISK_USAGE_TTL,
-  };
-
-  res.set('Cache-Control', 'no-store');
-  res.json({
+  _healthSnapshot = JSON.stringify({
     status:  'ok',
     uptime:  uptimeSecs,
     uptimeHuman: uptimeSecs < 60
@@ -1037,14 +1048,21 @@ app.get('/health', (req, res) => {
         ? `${Math.floor(uptimeSecs / 60)}m ${uptimeSecs % 60}s`
         : `${Math.floor(uptimeSecs / 3600)}h ${Math.floor((uptimeSecs % 3600) / 60)}m`,
     memory: {
-      heapUsedMB: +(mem.heapUsed / 1024 / 1024).toFixed(1),
+      heapUsedMB:  +(mem.heapUsed  / 1024 / 1024).toFixed(1),
       heapTotalMB: +(mem.heapTotal / 1024 / 1024).toFixed(1),
-      rssMB: +(mem.rss / 1024 / 1024).toFixed(1),
+      rssMB:       +(mem.rss       / 1024 / 1024).toFixed(1),
     },
-    cache: cacheStatus,
     node: process.version,
     time: new Date().toISOString(),
   });
+}
+_buildHealthSnapshot(); // build immediately so first request is never null
+setInterval(_buildHealthSnapshot, 5000).unref(); // refresh every 5 s
+
+app.get('/health', (req, res) => {
+  res.set('Content-Type', 'application/json');
+  res.set('Cache-Control', 'no-store');
+  res.end(_healthSnapshot);
 });
 
 
@@ -1362,13 +1380,41 @@ app.post('/evd/callback', (req, res) => {
       ref:         ref         ?? undefined,
       chunks:      chunks      ?? undefined,
       completedAt: isTerminal
-        ? (timestamp ? new Date(timestamp).toISOString() : new Date().toISOString())
+        ? (() => {
+            // The gbeyfia callback timestamp is 4 hours ahead of GMT+00.
+            // Subtract 4 hours to normalise to UTC.
+            const raw = timestamp ? new Date(timestamp) : new Date();
+            return new Date(raw.getTime() - 4 * 60 * 60 * 1000).toISOString();
+          })()
         : undefined,
     });
   }
 
   return res.json({ success: true });
 });
+
+// ── One-time migration: subtract 4 h from completedAt on existing EVD records ──────────
+// The gbeyfia callback was storing timestamps 4 hours ahead of UTC.
+// Records that were already fixed are tagged with _completedAtFixed=true so this
+// migration is idempotent across restarts.
+{
+  let migrated = 0;
+  try {
+    withFileLock(EVD_LOG, () => {
+      const orders = loadEvdLog();
+      const fixed  = orders.map(o => {
+        if (o._completedAtFixed || !o.completedAt) return o;
+        const corrected = new Date(new Date(o.completedAt).getTime() - 4 * 60 * 60 * 1000).toISOString();
+        migrated++;
+        return { ...o, completedAt: corrected, _completedAtFixed: true };
+      });
+      if (migrated > 0) saveEvdLog(fixed);
+    });
+    if (migrated > 0) console.log(`✅ EVD migration: corrected completedAt on ${migrated} record(s) (−4 h offset)`);
+  } catch (err) {
+    console.warn(`⚠️  EVD migration failed: ${err.message}`);
+  }
+}
 
 // GET /evd/history — paginated airtime order history.
 // Query: ?page=1&limit=50
