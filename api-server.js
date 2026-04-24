@@ -1380,12 +1380,7 @@ app.post('/evd/callback', (req, res) => {
       ref:         ref         ?? undefined,
       chunks:      chunks      ?? undefined,
       completedAt: isTerminal
-        ? (() => {
-            // The gbeyfia callback timestamp is 4 hours ahead of GMT+00.
-            // Subtract 4 hours to normalise to UTC.
-            const raw = timestamp ? new Date(timestamp) : new Date();
-            return new Date(raw.getTime() - 4 * 60 * 60 * 1000).toISOString();
-          })()
+        ? (timestamp ? new Date(timestamp).toISOString() : new Date().toISOString())
         : undefined,
     });
   }
@@ -1393,24 +1388,26 @@ app.post('/evd/callback', (req, res) => {
   return res.json({ success: true });
 });
 
-// ── One-time migration: subtract 4 h from completedAt on existing EVD records ──────────
-// The gbeyfia callback was storing timestamps 4 hours ahead of UTC.
-// Records that were already fixed are tagged with _completedAtFixed=true so this
-// migration is idempotent across restarts.
+// ── One-time migration: add back 4 h to records previously corrected by the old migration ──
+// A previous deploy subtracted 4 h from completedAt (tagged _completedAtFixed=true).
+// That correction was wrong — this migration restores those records to the original
+// timestamp and clears the tag so the field is no longer touched.
 {
   let migrated = 0;
   try {
     withFileLock(EVD_LOG, () => {
       const orders = loadEvdLog();
       const fixed  = orders.map(o => {
-        if (o._completedAtFixed || !o.completedAt) return o;
-        const corrected = new Date(new Date(o.completedAt).getTime() - 4 * 60 * 60 * 1000).toISOString();
+        if (!o._completedAtFixed || !o.completedAt) return o;
+        const restored = new Date(new Date(o.completedAt).getTime() + 4 * 60 * 60 * 1000).toISOString();
         migrated++;
-        return { ...o, completedAt: corrected, _completedAtFixed: true };
+        const updated = { ...o, completedAt: restored };
+        delete updated._completedAtFixed; // clear the tag
+        return updated;
       });
       if (migrated > 0) saveEvdLog(fixed);
     });
-    if (migrated > 0) console.log(`✅ EVD migration: corrected completedAt on ${migrated} record(s) (−4 h offset)`);
+    if (migrated > 0) console.log(`✅ EVD migration: restored completedAt on ${migrated} record(s) (+4 h reversal)`);
   } catch (err) {
     console.warn(`⚠️  EVD migration failed: ${err.message}`);
   }

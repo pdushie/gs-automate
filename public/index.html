@@ -819,10 +819,11 @@
               <th>Ref</th>
               <th>Sent</th>
               <th>Completed</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="evdTbody">
-            <tr><td colspan="9" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
+            <tr><td colspan="10" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
           </tbody>
         </table>
       </div>
@@ -1470,12 +1471,17 @@ async function evdToggleAuto() {
 function renderEvdTable(orders) {
   const tbody = document.getElementById('evdTbody');
   if (!orders.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty-cell">📤 No airtime orders yet</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="empty-cell">📤 No airtime orders yet</td></tr>';
     return;
   }
   const STATUS_CLS = { queued: 'QUEUED', processing: 'PROCESSING', completed: 'COMPLETED', failed: 'FAILED' };
+  const IN_FLIGHT  = new Set(['queued', 'processing', 'pending']);
   tbody.innerHTML = orders.map(o => {
-    const cls = STATUS_CLS[(o.status || '').toLowerCase()] || 'QUEUED';
+    const cls       = STATUS_CLS[(o.status || '').toLowerCase()] || 'QUEUED';
+    const inFlight  = IN_FLIGHT.has((o.status || '').toLowerCase());
+    const actionBtn = inFlight
+      ? `<button class="btn" style="font-size:0.72rem;padding:3px 8px;background:#22c55e;color:#fff;border:none" onclick="evdMarkDone('${esc(String(o.order_id ?? ''))}', this)" title="Mark as completed (callback never arrived)">✓ Mark Done</button>`
+      : '';
     return `<tr>
       <td style="font-family:monospace;font-size:0.78rem">${esc(String(o.order_id ?? '—'))}</td>
       <td style="font-size:0.78rem;color:var(--muted)">Acct ${esc(String(o.account ?? 1))}</td>
@@ -1486,8 +1492,35 @@ function renderEvdTable(orders) {
       <td style="font-family:monospace;font-size:0.72rem;color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(o.ref ?? '')}">${esc(o.ref ?? '—')}</td>
       <td style="font-size:0.77rem;color:var(--muted);white-space:nowrap">${esc(fmtDate(o.sentAt))}</td>
       <td style="font-size:0.77rem;color:var(--muted);white-space:nowrap">${esc(fmtDate(o.completedAt))}</td>
+      <td style="white-space:nowrap">${actionBtn}</td>
     </tr>`;
   }).join('');
+}
+
+async function evdMarkDone(orderId, btn) {
+  if (!orderId) return;
+  btn.disabled    = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch(`/evd/order/${encodeURIComponent(orderId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'completed', completedAt: new Date().toISOString() }),
+    });
+    const d = await r.json();
+    if (d.success) {
+      btn.textContent = '✓ Done';
+      btn.style.background = '#64748b';
+      setTimeout(() => loadEvdHistory(), 700);
+      setTimeout(() => loadEvdAccounts(), 800);
+    } else {
+      btn.textContent = '✗ Error';
+      btn.disabled = false;
+    }
+  } catch {
+    btn.textContent = '✗ Error';
+    btn.disabled = false;
+  }
 }
 
 async function evdCancelStuck() {
