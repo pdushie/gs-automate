@@ -834,6 +834,8 @@ app.get('/balance', async (req, res) => {
       balance: fresh.balanceText,
       balanceMB: fresh.balanceMB,
       checkedAt: fresh.checkedAt,
+      accountGhc: fresh.accountGhc ?? null,
+      accountText: fresh.accountText || null,
       fresh: true,
     });
   }
@@ -1676,8 +1678,18 @@ async function runEvdAutoLoader() {
     return s === 'queued' || s === 'processing' || s === 'pending';
   });
   if (inFlight) {
-    console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} but order #${inFlight.order_id} is still ${inFlight.status} — waiting`);
-    return;
+    const EVD_AUTO_ORDER_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+    const sentAt = inFlight.sentAt ? new Date(inFlight.sentAt).getTime() : null;
+    const ageMs  = sentAt ? Date.now() - sentAt : Infinity;
+    if (ageMs < EVD_AUTO_ORDER_TIMEOUT_MS) {
+      const ageMin = Math.floor(ageMs / 60000);
+      console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} but order #${inFlight.order_id} is still ${inFlight.status} (${ageMin}min ago) — waiting`);
+      return;
+    }
+    // Order has been stuck for over 30 min — auto-expire it and proceed
+    const ageMin = Math.floor(ageMs / 60000);
+    console.warn(`⚠️  EVD auto-loader: order #${inFlight.order_id} has been ${inFlight.status} for ${ageMin}min — auto-expiring and proceeding`);
+    upsertEvdOrder({ ...inFlight, status: 'cancelled', notes: `auto-expired after ${ageMin}min (no callback)` });
   }
 
   console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} — triggering purchase for all accounts`);

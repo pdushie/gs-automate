@@ -1250,6 +1250,24 @@ function setTab(btn) {
 }
 
 /* ── Refresh ─────────────────────────────── */
+function applyFreshBalance(b) {
+  // b = { balanceMB, checkedAt, accountGhc, accountText } from /balance?refresh=true
+  if (!b || !b.fresh) return;
+  document.getElementById('balVal').textContent = fmtMB(b.balanceMB);
+  const ageMins = Math.round((Date.now() - new Date(b.checkedAt)) / 60_000);
+  document.getElementById('balSub').textContent = ageMins < 1 ? 'Updated just now' : `Updated ${ageMins} min ago`;
+  const acctVal = document.getElementById('acctVal');
+  const acctSub = document.getElementById('acctSub');
+  if (b.accountGhc != null) {
+    acctVal.textContent = `GH\u00a2\u00a0${b.accountGhc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    acctVal.style.color = b.accountGhc < 4813 ? 'var(--orange)' : 'var(--text)';
+    acctSub.textContent = 'GH\u00a2 account balance';
+  } else if (b.accountText) {
+    acctVal.textContent = b.accountText;
+    acctSub.textContent = 'GH\u00a2 account balance';
+  }
+}
+
 async function doRefresh() {
   const btn  = document.getElementById('refreshBtn');
   const icon = document.getElementById('rIcon');
@@ -1258,6 +1276,12 @@ async function doRefresh() {
   // progress bar: snap to 0 while loading
   const bar = document.getElementById('refreshBar');
   if (bar) { bar.style.transition = 'none'; bar.style.width = '0%'; }
+
+  // Fire balance refresh in parallel — updates balance cards as soon as portal responds
+  fetch('/balance?refresh=true')
+    .then(r => r.ok ? r.json() : null)
+    .then(b => applyFreshBalance(b))
+    .catch(() => {});
 
   try {
     const d = await fetchSummary();
