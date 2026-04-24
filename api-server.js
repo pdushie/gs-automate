@@ -1380,7 +1380,10 @@ app.post('/evd/callback', (req, res) => {
       ref:         ref         ?? undefined,
       chunks:      chunks      ?? undefined,
       completedAt: isTerminal
-        ? (timestamp ? new Date(timestamp).toISOString() : new Date().toISOString())
+        ? (() => {
+            const raw = timestamp ? new Date(timestamp) : new Date();
+            return new Date(raw.getTime() - 3 * 60 * 60 * 1000).toISOString();
+          })()
         : undefined,
     });
   }
@@ -1388,26 +1391,22 @@ app.post('/evd/callback', (req, res) => {
   return res.json({ success: true });
 });
 
-// ── One-time migration: add back 4 h to records previously corrected by the old migration ──
-// A previous deploy subtracted 4 h from completedAt (tagged _completedAtFixed=true).
-// That correction was wrong — this migration restores those records to the original
-// timestamp and clears the tag so the field is no longer touched.
+// ── One-time migration: subtract 3 h from completedAt on all existing EVD records ────────
+// Records are tagged _completedAt3hFixed=true so this is idempotent across restarts.
 {
   let migrated = 0;
   try {
     withFileLock(EVD_LOG, () => {
       const orders = loadEvdLog();
       const fixed  = orders.map(o => {
-        if (!o._completedAtFixed || !o.completedAt) return o;
-        const restored = new Date(new Date(o.completedAt).getTime() + 4 * 60 * 60 * 1000).toISOString();
+        if (o._completedAt3hFixed || !o.completedAt) return o;
+        const corrected = new Date(new Date(o.completedAt).getTime() - 3 * 60 * 60 * 1000).toISOString();
         migrated++;
-        const updated = { ...o, completedAt: restored };
-        delete updated._completedAtFixed; // clear the tag
-        return updated;
+        return { ...o, completedAt: corrected, _completedAt3hFixed: true };
       });
       if (migrated > 0) saveEvdLog(fixed);
     });
-    if (migrated > 0) console.log(`✅ EVD migration: restored completedAt on ${migrated} record(s) (+4 h reversal)`);
+    if (migrated > 0) console.log(`✅ EVD migration: subtracted 3 h from completedAt on ${migrated} record(s)`);
   } catch (err) {
     console.warn(`⚠️  EVD migration failed: ${err.message}`);
   }
@@ -1733,15 +1732,15 @@ async function runEvdAutoLoader() {
 
 
 // ── PORT BINDING ───────────────────────────────────────────
-const API_PORT = process.env.PORT || process.env.API_PORT || 7070;
+const API_PORT = process.env.PORT || process.env.API_INTERNAL_PORT || process.env.API_PORT || 7070;
 const PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${API_PORT}`;
 
 
 const server = app.listen(API_PORT, () => {
-  console.log(`🚀 API server running on port ${API_PORT}`);
-  // Increase timeouts to prevent 502 Bad Gateway from reverse proxy (Render)
-  server.keepAliveTimeout = 120000; // 120s (must exceed proxy idle timeout)
-  server.headersTimeout = 125000;   // slightly above keepAliveTimeout
+  console.log(`🚀 API server running on internal port ${API_PORT}`);
+  // Keep-alive timeouts on the internal server (proxy→api-server leg).
+  server.keepAliveTimeout = 120000;
+  server.headersTimeout   = 125000;
   console.log(`📡 Endpoints:`);
   console.log(`   POST ${PUBLIC_URL}/upload         — upload .xlsx file (multipart)`);
   console.log(`   POST ${PUBLIC_URL}/upload-base64  — upload .xlsx file (base64)`);
