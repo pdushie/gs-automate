@@ -22,6 +22,39 @@ function escapeHtml(str) {
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
+
+// Transient network error patterns — these are portal/connection blips, not code bugs.
+const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::/i;
+
+// page.goto with automatic retry on transient network errors (up to maxRetries attempts).
+async function gotoWithRetry(page, url, opts, maxRetries = 3) {
+  const navOpts = opts || {};
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await page.goto(url, navOpts);
+    } catch (err) {
+      if (!TRANSIENT_NAV_ERR.test(err.message) || attempt === maxRetries) throw err;
+      const delayMs = attempt * 5000;
+      console.warn(`⚠️  goto ${url} failed (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delayMs / 1000}s`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
+// page.reload with automatic retry on transient network errors.
+async function reloadWithRetry(page, opts, maxRetries = 3) {
+  const navOpts = opts || {};
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await page.reload(navOpts);
+    } catch (err) {
+      if (!TRANSIENT_NAV_ERR.test(err.message) || attempt === maxRetries) throw err;
+      const delayMs = attempt * 5000;
+      console.warn(`⚠️  page.reload failed (attempt ${attempt}/${maxRetries}): ${err.message} — retrying in ${delayMs / 1000}s`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
@@ -415,9 +448,9 @@ async function purchaseData(page, context) {
     console.log('ℹ️  Account balance not available via API — will verify on purchase page');
   }
 
-  await page.goto('https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
   // Reload to flush any cached balance value the page may render on first load
-  await page.reload({ waitUntil: 'networkidle' });
+  await reloadWithRetry(page, { waitUntil: 'networkidle' });
 
   // Read account balance from DOM (secondary verification)
   await page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { timeout: 15000 });
@@ -550,8 +583,8 @@ async function checkBalance(page, context) {
 
   // ── Fallback: DOM scrape ──
   console.log('\n💰 Checking data balance (DOM)...');
-  await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
-  await page.reload({ waitUntil: 'networkidle' });
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
+  await reloadWithRetry(page, { waitUntil: 'networkidle' });
   await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
   await page.waitForTimeout(2000);
 
@@ -735,7 +768,7 @@ async function uploadFile(page, excelFile) {
     });
   }
 
-  await page.goto('https://up2u.mtn.com.gh/upload/upload-beneficiaries', { waitUntil: 'networkidle' });
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-beneficiaries', { waitUntil: 'networkidle' });
 
   // Check if a previous upload is still processing — MTN blocks new uploads in this case
   const isBlocked = await page.evaluate(() => {
@@ -857,7 +890,7 @@ async function uploadFile(page, excelFile) {
     console.log(`🔍 Nav failed — checking upload-status page for "${fileName}" before marking timeout...`);
     let recoveredToStatusPage = false;
     try {
-      await page.goto('https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle', timeout: 20000 });
+      await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle', timeout: 20000 });
       await page.waitForTimeout(3000); // allow table to render
       const statusOnPage = await page.evaluate((name) => {
         const rows = document.querySelectorAll('tr.k-master-row');
@@ -960,13 +993,13 @@ async function uploadFile(page, excelFile) {
   let isFailed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await page.reload({ waitUntil: 'networkidle' });
+    await reloadWithRetry(page, { waitUntil: 'networkidle' });
 
     if (page.url().includes('/account/login')) {
       console.warn('🔒 Session expired during polling — re-logging in...');
       sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired during upload polling. Re-logging in...');
       await login(page);
-      await page.goto('https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle' });
+      await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle' });
     }
 
     const status = await page.evaluate((name) => {

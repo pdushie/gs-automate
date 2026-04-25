@@ -501,6 +501,30 @@
     .btn.btn-save { border-color: var(--accent); color: var(--accent); }
     .btn.btn-save:hover { background: rgba(255,203,0,0.08); }
 
+    /* ── Pagination bar ── */
+    .pagination {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 18px;
+      border-top: 1px solid var(--border);
+      font-size: 0.78rem;
+      color: var(--muted);
+      flex-wrap: wrap;
+    }
+    .btn-pg {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 3px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 0.77rem;
+    }
+    .btn-pg:disabled { opacity: 0.35; cursor: default; }
+    .btn-pg:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+    .btn-pg.show-all { margin-left: auto; border-color: var(--accent); color: var(--accent); }
+
     /* ── Retry-callback modal ── */
     .overlay {
       display: none;
@@ -668,6 +692,7 @@
       <button class="btn" id="refreshBtn" onclick="doRefresh()">
         <span id="rIcon">↻</span> Refresh
       </button>
+      <button class="btn" id="restartBotBtn" onclick="restartBot()" title="Kill and restart the Playwright bot process">🔄 Restart Bot</button>
       <button class="btn btn-warn" onclick="logout()" title="Sign out">
         ⭳ Sign out
       </button>
@@ -780,6 +805,7 @@
             <tr><td colspan="8" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
           </tbody>
         </table>
+        <div id="filesPagination"></div>
       </div>
     </div>
   </div>
@@ -826,6 +852,7 @@
             <tr><td colspan="10" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
           </tbody>
         </table>
+        <div id="evdPagination"></div>
       </div>
     </div>
   </div>
@@ -878,6 +905,16 @@ let cdSecs         = 30;
 let cdTimer        = null;
 let _lastSummaryFP = null; // fingerprint of last rendered summary
 let _searchDebounce = null;
+
+/* ── Pagination state ────────────────────── */
+const FILES_PER_PAGE = 30;
+const EVD_PER_PAGE   = 30;
+let filesPage      = 1;
+let filesShowAll   = false;
+let _filteredFiles = [];
+let allEvdOrders   = [];
+let evdPage        = 1;
+let evdShowAll     = false;
 
 /* ── Formatting ──────────────────────────── */
 function fmtMB(mb) {
@@ -1229,15 +1266,48 @@ function applyView() {
     hint.textContent = '';
   }
 
-  renderTable(list, q);
+  _filteredFiles = list;
+  const displayList = filesShowAll ? list : list.slice((filesPage - 1) * FILES_PER_PAGE, filesPage * FILES_PER_PAGE);
+  renderTable(displayList, q);
+  renderFilesPagination(list.length, filesPage, filesShowAll);
+}
+
+function renderFilesPagination(total, page, showAll) {
+  const el = document.getElementById('filesPagination');
+  if (!el) return;
+  const totalPages = Math.ceil(total / FILES_PER_PAGE);
+  if (total <= FILES_PER_PAGE && !showAll) { el.innerHTML = ''; return; }
+  const from = showAll ? 1 : (page - 1) * FILES_PER_PAGE + 1;
+  const to   = showAll ? total : Math.min(page * FILES_PER_PAGE, total);
+  el.innerHTML = `<div class="pagination">
+    <button class="btn-pg" onclick="filesGoPage(${page - 1})" ${page <= 1 || showAll ? 'disabled' : ''}>&#8249; Prev</button>
+    <span>${showAll ? `All ${total} files` : `${from}–${to} of ${total}`}</span>
+    <button class="btn-pg" onclick="filesGoPage(${page + 1})" ${page >= totalPages || showAll ? 'disabled' : ''}>Next &#8250;</button>
+    <button class="btn-pg show-all" onclick="filesToggleShowAll()">${showAll ? 'Page view' : 'Show all'}</button>
+  </div>`;
+}
+
+function filesGoPage(p) {
+  filesPage = Math.max(1, p);
+  const displayList = filesShowAll ? _filteredFiles : _filteredFiles.slice((filesPage - 1) * FILES_PER_PAGE, filesPage * FILES_PER_PAGE);
+  renderTable(displayList, (document.getElementById('sinp').value || '').trim());
+  renderFilesPagination(_filteredFiles.length, filesPage, filesShowAll);
+}
+
+function filesToggleShowAll() {
+  filesShowAll = !filesShowAll;
+  filesPage = 1;
+  applyView();
 }
 
 function onSearch() {
+  filesPage = 1;
   clearTimeout(_searchDebounce);
   _searchDebounce = setTimeout(applyView, 150);
 }
 
 function clearSearch() {
+  filesPage = 1;
   document.getElementById('sinp').value = '';
   applyView();
 }
@@ -1246,6 +1316,7 @@ function setTab(btn) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   btn.classList.add('active');
   tabFilter = btn.dataset.f;
+  filesPage = 1;
   applyView();
 }
 
@@ -1361,12 +1432,46 @@ function setPageTab(tab) {
 /* ── EVD Airtime ───────────────────────────── */
 async function loadEvdHistory() {
   try {
-    const r = await fetch('/evd/history?limit=100');
+    const r = await fetch('/evd/history?limit=1000');
     if (!r.ok) return;
     const d = await r.json();
-    renderEvdTable(d.orders || []);
-    document.getElementById('evdBadge').textContent = d.total ?? (d.orders || []).length;
+    allEvdOrders = d.orders || [];
+    document.getElementById('evdBadge').textContent = d.total ?? allEvdOrders.length;
+    renderEvdPage();
   } catch {}
+}
+
+function renderEvdPage() {
+  const total = allEvdOrders.length;
+  const list  = evdShowAll ? allEvdOrders : allEvdOrders.slice((evdPage - 1) * EVD_PER_PAGE, evdPage * EVD_PER_PAGE);
+  renderEvdTable(list);
+  renderEvdPagination(total, evdPage, evdShowAll);
+}
+
+function renderEvdPagination(total, page, showAll) {
+  const el = document.getElementById('evdPagination');
+  if (!el) return;
+  const totalPages = Math.ceil(total / EVD_PER_PAGE);
+  if (total <= EVD_PER_PAGE && !showAll) { el.innerHTML = ''; return; }
+  const from = showAll ? 1 : (page - 1) * EVD_PER_PAGE + 1;
+  const to   = showAll ? total : Math.min(page * EVD_PER_PAGE, total);
+  el.innerHTML = `<div class="pagination">
+    <button class="btn-pg" onclick="evdGoPage(${page - 1})" ${page <= 1 || showAll ? 'disabled' : ''}>&#8249; Prev</button>
+    <span>${showAll ? `All ${total} orders` : `${from}–${to} of ${total}`}</span>
+    <button class="btn-pg" onclick="evdGoPage(${page + 1})" ${page >= totalPages || showAll ? 'disabled' : ''}>Next &#8250;</button>
+    <button class="btn-pg show-all" onclick="evdToggleShowAll()">${showAll ? 'Page view' : 'Show all'}</button>
+  </div>`;
+}
+
+function evdGoPage(p) {
+  evdPage = Math.max(1, p);
+  renderEvdPage();
+}
+
+function evdToggleShowAll() {
+  evdShowAll = !evdShowAll;
+  evdPage = 1;
+  renderEvdPage();
 }
 
 async function loadEvdAccounts() {
@@ -1544,6 +1649,27 @@ async function evdMarkDone(orderId, btn) {
   } catch {
     btn.textContent = '✗ Error';
     btn.disabled = false;
+  }
+}
+
+async function restartBot() {
+  const btn = document.getElementById('restartBotBtn');
+  if (!confirm('Restart the bot? Any in-progress upload will be interrupted and the bot will re-login.')) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch('/bot/restart', { method: 'POST' });
+    const d = await r.json();
+    if (d.success) {
+      btn.textContent = '✓ Restarting…';
+      setTimeout(() => { btn.textContent = '🔄 Restart Bot'; btn.disabled = false; }, 6000);
+    } else {
+      btn.textContent = '✗ Error';
+      setTimeout(() => { btn.textContent = '🔄 Restart Bot'; btn.disabled = false; }, 3000);
+    }
+  } catch {
+    btn.textContent = '✗ Error';
+    setTimeout(() => { btn.textContent = '🔄 Restart Bot'; btn.disabled = false; }, 3000);
   }
 }
 

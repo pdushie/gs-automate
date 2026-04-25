@@ -1421,7 +1421,7 @@ app.get('/evd/history', (req, res) => {
 
   const orders = loadEvdLog();
   const page   = Math.max(1, parseInt(req.query.page  || '1'));
-  const limit  = Math.min(200, Math.max(1, parseInt(req.query.limit || '50')));
+  const limit  = Math.min(1000, Math.max(1, parseInt(req.query.limit || '50')));
   const start  = (page - 1) * limit;
   const slice  = orders.slice(start, start + limit);
 
@@ -1742,6 +1742,19 @@ async function runEvdAutoLoader() {
   setInterval(runEvdAutoLoader, pollMins * 60 * 1000);
 }
 
+
+// POST /bot/restart — signals start.js to kill and restart the bot process.
+// start.js polls the status log every 5 s for this flag and re-spawns the bot.
+app.post('/bot/restart', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  withFileLock(STATUS_LOG, () => {
+    const log = loadStatusLog();
+    log._botRestartRequested = true;
+    atomicWrite(STATUS_LOG, JSON.stringify(log, null, 2));
+  });
+  console.log('🔄 Bot restart requested via dashboard');
+  return res.json({ success: true, note: 'Bot restart signal sent. Bot will restart within 5 seconds.' });
+});
 
 // ── PORT BINDING ───────────────────────────────────────────
 const API_PORT = process.env.PORT || process.env.API_INTERNAL_PORT || process.env.API_PORT || 7070;

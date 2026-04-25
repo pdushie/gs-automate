@@ -1,5 +1,7 @@
 const { spawn } = require('child_process');
 const http    = require('http');
+const fs      = require('fs');
+const path    = require('path');
 
 console.log('🚀 Starting MTN GroupShare services...');
 console.log(`🌐 Public PORT: ${process.env.PORT || 'not set'}`);
@@ -115,6 +117,21 @@ function spawnBot() {
 }
 
 spawnBot();
+
+// Poll status log every 5 s for a manual bot restart request from the dashboard.
+const STATUS_LOG_PATH = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
+setInterval(() => {
+  try {
+    if (!fs.existsSync(STATUS_LOG_PATH)) return;
+    const log = JSON.parse(fs.readFileSync(STATUS_LOG_PATH, 'utf8'));
+    if (!log._botRestartRequested) return;
+    // Clear the flag immediately to prevent duplicate restarts
+    log._botRestartRequested = false;
+    fs.writeFileSync(STATUS_LOG_PATH, JSON.stringify(log, null, 2));
+    console.log('🔄 Manual bot restart triggered from dashboard — killing bot process...');
+    if (currentBot) currentBot.kill('SIGTERM'); // start.js auto-respawns it
+  } catch {}
+}, 5000);
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
