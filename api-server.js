@@ -848,19 +848,46 @@ app.get('/balance', async (req, res) => {
   // Queue-full guard — only applied to external (unauthenticated) callers.
   // Returns a normal-shaped response with balanceMB:0 so the sender naturally
   // backs off without needing any code changes on their end.
+  // Exception: if ALL pending files exceed available balance (balance-blocked deadlock),
+  // advertise the real balance so a smaller file can come in and drain the balance.
   if (!isDashboard) {
     const pending  = getPendingFileCount();
     const maxDepth = getQueueMaxDepth();
-    if (pending >= maxDepth) {
-      const log = loadStatusLog();
-      return res.json({
-        success:   true,
-        balance:   '0 GB',
-        balanceMB: 0,
-        checkedAt: log._lastBalanceCheckedAt || null,
-        cacheAge:  null,
-        fresh:     false,
-      });
+    if (pending >= maxDepth * 3) {
+      const log           = loadStatusLog();
+      const availableMB   = log._lastBalanceMB || 0;
+      // Check if every pending file is too large to process with current balance.
+      // If so, lift the throttle so a smaller file can unblock the queue.
+      const uploadedLog   = loadUploadedLog();
+      const folderPath    = process.env.EXCEL_FOLDER_PATH;
+      let balanceBlocked  = false;
+      if (availableMB > 0 && folderPath && fs.existsSync(folderPath)) {
+        const DONE_STATES   = new Set(['DONE', 'ABANDONED', 'FAILED']);
+        const PENDING_STATES = new Set(['PENDING', 'TIMEOUT', 'IN_PROGRESS', 'PROCESSING']);
+        const pendingFiles  = fs.readdirSync(folderPath)
+          .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
+          .filter(f => !uploadedLog.includes(f) && !DONE_STATES.has(log[f]) && PENDING_STATES.has(resolveFileStatus(f, uploadedLog, log).status));
+        if (pendingFiles.length > 0) {
+          const allExceed = pendingFiles.every(f => {
+            const fileMB = log[`${f}_totalMB`] ?? 0;
+            return fileMB > availableMB;
+          });
+          if (allExceed) balanceBlocked = true;
+        }
+      }
+
+      if (!balanceBlocked) {
+        return res.json({
+          success:   true,
+          balance:   '0 GB',
+          balanceMB: 0,
+          checkedAt: log._lastBalanceCheckedAt || null,
+          cacheAge:  null,
+          fresh:     false,
+        });
+      }
+      // balanceBlocked=true — fall through and return real balance so a smaller file can come in
+      console.log(`🔓 Queue depth limit reached but all pending files exceed balance (${(availableMB/1024).toFixed(2)} GB) — advertising real balance to unblock`);
     }
   }
 
@@ -1231,8 +1258,8 @@ app.get('/summary', requireAuth, (req, res) => {
     done:        files.filter(f => DONE_SET.has(f.status)).length,
     failed:      files.filter(f => FAILED_SET.has(f.status)).length,
     nextInLine:  pendingOrdered.length > 0 ? pendingOrdered[0].filename : null,
-    maxDepth: queueMaxDepth,
-    queueFull: queueActivePending >= queueMaxDepth,
+    maxDepth: queueMaxDepth * 3,
+    queueFull: queueActivePending >= queueMaxDepth * 3,
     pendingMB: Math.round(
       files
         .filter(f => !DONE_SET.has(f.status) && !FAILED_SET.has(f.status))
