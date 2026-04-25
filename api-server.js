@@ -1770,7 +1770,11 @@ async function runEvdAutoLoader() {
     const completedAt = o.completedAt ? new Date(o.completedAt).getTime()
                       : o.sentAt      ? new Date(o.sentAt).getTime()
                       : null;
-    return completedAt && (Date.now() - completedAt) < EVD_SETTLE_WINDOW_MS;
+    if (!completedAt) return false;
+    const age = Date.now() - completedAt;
+    // Only block if the order completed in the past (age > 0) and within the settle window.
+    // A negative age means completedAt is in the future (clock skew) — don't block.
+    return age > 0 && age < EVD_SETTLE_WINDOW_MS;
   });
   if (recentCompleted) {
     const ageMin = Math.floor((Date.now() - new Date(recentCompleted.completedAt || recentCompleted.sentAt).getTime()) / 60000);
