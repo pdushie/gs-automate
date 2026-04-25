@@ -54,7 +54,9 @@ services:
       - key: EVD_AUTO_ENABLED
         value: "true"
       - key: EVD_AUTO_MIN_BALANCE_GHC
-        value: "20"
+        value: "4000"
+      - key: EVD_PURCHASE_TARGET_GHC
+        value: "4813"
       - key: EVD_AUTO_POLL_MINS
         value: "3"
     healthCheckPath: /health

@@ -802,10 +802,67 @@ async function fetchFreshBalanceFromPortal() {
   }
 }
 
+// ── QUEUE DEPTH THROTTLE ───────────────────────────────────
+// When the pending file queue is at its maximum depth, GET /balance
+// returns 0 so that upstream sending systems see "no capacity" and
+// hold off from submitting new files.  This is preferable to blocking
+// uploads (which leaves files stuck in "processing" on the sender side).
+//
+// Max depth = QUEUE_MAX_DEPTH env var, or 2 × number of configured EVD
+// accounts (auto-scaling). External callers see { queueFull: true,
+// balanceMB: 0 } and should pause until queueFull is false.
+
+function getQueueMaxDepth() {
+  if (process.env.QUEUE_MAX_DEPTH) return parseInt(process.env.QUEUE_MAX_DEPTH);
+  // Auto-scale: 2 × number of EVD accounts — each account represents one concurrent send slot.
+  // Falls back to 4 when EVD is not configured so there is always a reasonable safety buffer.
+  const acctCount = getEvdAccounts().length;
+  return acctCount > 0 ? acctCount * 2 : 4;
+}
+
+function getPendingFileCount() {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  if (!folderPath || !fs.existsSync(folderPath)) return 0;
+  try {
+    const uploaded  = loadUploadedLog();
+    const statusLog = loadStatusLog();
+    const PENDING_STATES = new Set(['PENDING', 'TIMEOUT', 'IN_PROGRESS', 'PROCESSING']);
+    return fs.readdirSync(folderPath)
+      .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
+      .filter(f => PENDING_STATES.has(resolveFileStatus(f, uploaded, statusLog).status))
+      .length;
+  } catch {
+    return 0;
+  }
+}
+
 // GET /balance — return current balance from status log (refreshed each bot iteration).
 // Add ?refresh=true to force an immediate balance refresh via direct portal API call.
+// When the file queue is at its depth limit, returns balanceMB:0 so external senders
+// back off.  Authenticated dashboard calls (/summary, /balance via header) always see
+// real values via the X-Internal-Dashboard header.
 app.get('/balance', async (req, res) => {
-  const wantRefresh = req.query.refresh === 'true';
+  const wantRefresh   = req.query.refresh === 'true';
+  const isDashboard   = req.headers['x-internal-dashboard'] === '1' || isAuthenticated(req);
+
+  // Queue-full guard — only applied to external (unauthenticated) callers.
+  // Returns a normal-shaped response with balanceMB:0 so the sender naturally
+  // backs off without needing any code changes on their end.
+  if (!isDashboard) {
+    const pending  = getPendingFileCount();
+    const maxDepth = getQueueMaxDepth();
+    if (pending >= maxDepth) {
+      const log = loadStatusLog();
+      return res.json({
+        success:   true,
+        balance:   '0 GB',
+        balanceMB: 0,
+        checkedAt: log._lastBalanceCheckedAt || null,
+        cacheAge:  null,
+        fresh:     false,
+      });
+    }
+  }
 
   if (!wantRefresh) {
     // Fast path — return current balance immediately from status log
@@ -822,6 +879,7 @@ app.get('/balance', async (req, res) => {
       balanceMB: log._lastBalanceMB || 0,
       checkedAt: log._lastBalanceCheckedAt || null,
       cacheAge,
+      queueFull: false,
       fresh: false,
     });
   }
@@ -836,6 +894,7 @@ app.get('/balance', async (req, res) => {
       checkedAt: fresh.checkedAt,
       accountGhc: fresh.accountGhc ?? null,
       accountText: fresh.accountText || null,
+      queueFull: false,
       fresh: true,
     });
   }
@@ -856,6 +915,7 @@ app.get('/balance', async (req, res) => {
     balanceMB: final._lastBalanceMB || 0,
     checkedAt: final._lastBalanceCheckedAt || null,
     cacheAge: cacheAge2,
+    queueFull: false,
     fresh: false,
     note: noteStr,
   });
@@ -1159,6 +1219,11 @@ app.get('/summary', requireAuth, (req, res) => {
     return a.filename.localeCompare(b.filename);
   });
 
+  const queueMaxDepth = getQueueMaxDepth();
+  const queueActivePending = files.filter(f => {
+    const s = f.status || 'PENDING';
+    return s === 'PENDING' || s === 'TIMEOUT' || ACTIVE_SET.has(s);
+  }).length;
   const queue = {
     total:       files.length,
     pending:     files.filter(f => !f.status || f.status === 'PENDING').length,
@@ -1166,6 +1231,8 @@ app.get('/summary', requireAuth, (req, res) => {
     done:        files.filter(f => DONE_SET.has(f.status)).length,
     failed:      files.filter(f => FAILED_SET.has(f.status)).length,
     nextInLine:  pendingOrdered.length > 0 ? pendingOrdered[0].filename : null,
+    maxDepth: queueMaxDepth,
+    queueFull: queueActivePending >= queueMaxDepth,
     pendingMB: Math.round(
       files
         .filter(f => !DONE_SET.has(f.status) && !FAILED_SET.has(f.status))
@@ -1673,12 +1740,14 @@ async function runEvdAutoLoader() {
     if (!id || latestByOrderId.has(id)) continue; // first hit = most recent
     latestByOrderId.set(id, o);
   }
+  const EVD_AUTO_ORDER_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+  const EVD_SETTLE_WINDOW_MS      = 12 * 60 * 1000; // wait 12 min after a completed order before re-triggering
+
   const inFlight = [...latestByOrderId.values()].find(o => {
     const s = (o.status || '').toLowerCase();
     return s === 'queued' || s === 'processing' || s === 'pending';
   });
   if (inFlight) {
-    const EVD_AUTO_ORDER_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
     const sentAt = inFlight.sentAt ? new Date(inFlight.sentAt).getTime() : null;
     const ageMs  = sentAt ? Date.now() - sentAt : Infinity;
     if (ageMs < EVD_AUTO_ORDER_TIMEOUT_MS) {
@@ -1692,12 +1761,40 @@ async function runEvdAutoLoader() {
     upsertEvdOrder({ ...inFlight, status: 'cancelled', notes: `auto-expired after ${ageMin}min (no callback)` });
   }
 
+  // Settle-window guard: if a recent completed order exists, the MTN portal balance may
+  // not yet reflect the credit.  Wait EVD_SETTLE_WINDOW_MS before re-triggering to avoid
+  // placing a duplicate purchase while crediting is still in progress.
+  const recentCompleted = [...latestByOrderId.values()].find(o => {
+    const s = (o.status || '').toLowerCase();
+    if (s !== 'completed' && s !== 'success') return false;
+    const completedAt = o.completedAt ? new Date(o.completedAt).getTime()
+                      : o.sentAt      ? new Date(o.sentAt).getTime()
+                      : null;
+    return completedAt && (Date.now() - completedAt) < EVD_SETTLE_WINDOW_MS;
+  });
+  if (recentCompleted) {
+    const ageMin = Math.floor((Date.now() - new Date(recentCompleted.completedAt || recentCompleted.sentAt).getTime()) / 60000);
+    console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} but order #${recentCompleted.order_id} completed only ${ageMin}min ago — waiting for balance to settle`);
+    return;
+  }
+
   console.log(`🤖 EVD auto-loader: balance GH¢ ${ghcBalance.toFixed(2)} < GH¢ ${minBalance} — triggering purchase for all accounts`);
+
+  // Dynamic purchase amount: top-up only what is needed to reach the purchase target.
+  // This prevents the portal balance from exceeding the maximum allowed by the EVD API,
+  // which would cause requests to be rejected when the balance is already high.
+  const EVD_PURCHASE_TARGET_GHC = parseFloat(process.env.EVD_PURCHASE_TARGET_GHC || '4813');
+  const needed = Math.round(EVD_PURCHASE_TARGET_GHC - ghcBalance);
 
   const accounts = getEvdAccounts();
   for (const acct of accounts) {
+    // Cap send amount to what's needed; never exceed the account's configured max.
+    const sendAmount = Math.min(acct.amount, Math.max(1, needed));
     const ref = `evans_bot_auto_${Date.now()}`;
-    const payload = { key: acct.key, phone: acct.phone, amount: acct.amount, network: acct.network, ref };
+    const payload = { key: acct.key, phone: acct.phone, amount: sendAmount, network: acct.network, ref };
+    if (sendAmount !== acct.amount) {
+      console.log(`🤖 EVD auto-loader: dynamic amount GH¢ ${sendAmount} (configured GH¢ ${acct.amount}, balance GH¢ ${ghcBalance.toFixed(2)}, target GH¢ ${EVD_PURCHASE_TARGET_GHC})`);
+    }
     try {
       const r    = await fetch(`${EVD_API_BASE}/send`, {
         method: 'POST',
@@ -1711,7 +1808,7 @@ async function runEvdAutoLoader() {
           account:     acct.index,
           phone:       acct.phone,
           network:     acct.network,
-          amount:      data.amount ?? acct.amount,
+          amount:      data.amount ?? sendAmount,
           status:      data.status ?? 'queued',
           ref:         data.ref ?? ref,
           chunks:      data.chunks ?? null,
@@ -1720,7 +1817,7 @@ async function runEvdAutoLoader() {
           paidAmount:  null,
           auto:        true,
         });
-        console.log(`✅ EVD auto-loader: order #${data.order_id} queued — GH¢ ${acct.amount} → ${acct.phone}`);
+        console.log(`✅ EVD auto-loader: order #${data.order_id} queued — GH¢ ${sendAmount} → ${acct.phone}`);
       } else {
         const HTTP_ERRORS = { 401: 'Bad API key', 402: 'Insufficient EVD wallet balance', 422: 'Validation error', 500: 'EVD server error', 503: 'EVD maintenance' };
         const msg = data.message || HTTP_ERRORS[r.status] || `HTTP ${r.status}`;

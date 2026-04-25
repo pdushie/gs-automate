@@ -1041,8 +1041,16 @@ function renderStats(d) {
 
   // Queue
   const active = queue.pending + queue.active;
-  document.getElementById('queueVal').textContent = active;
-  document.getElementById('queueSub').textContent = `${fmtMB(queue.pendingMB)} pending allocation`;
+  const queueValEl = document.getElementById('queueVal');
+  const queueSubEl = document.getElementById('queueSub');
+  queueValEl.textContent = active;
+  if (queue.queueFull) {
+    queueValEl.style.color = 'var(--orange)';
+    queueSubEl.innerHTML = `<span style="color:var(--orange);font-weight:600">⛔ Queue full (${active}/${queue.maxDepth}) — advertising 0 balance</span>`;
+  } else {
+    queueValEl.style.color = '';
+    queueSubEl.textContent = `${fmtMB(queue.pendingMB)} pending allocation${queue.maxDepth ? ` · max ${queue.maxDepth}` : ''}`;
+  }
 
   // Next in line strip
   const strip    = document.getElementById('nextStrip');
@@ -1349,7 +1357,9 @@ async function doRefresh() {
   if (bar) { bar.style.transition = 'none'; bar.style.width = '0%'; }
 
   // Fire balance refresh in parallel — updates balance cards as soon as portal responds
-  fetch('/balance?refresh=true')
+  // X-Internal-Dashboard header lets the server bypass queue throttle for dashboard calls
+  // (belt-and-suspenders for when auth is disabled; session cookie handles the auth-on case).
+  fetch('/balance?refresh=true', { headers: { 'X-Internal-Dashboard': '1' } })
     .then(r => r.ok ? r.json() : null)
     .then(b => applyFreshBalance(b))
     .catch(() => {});
