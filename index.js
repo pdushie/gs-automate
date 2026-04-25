@@ -430,7 +430,7 @@ async function login(page) {
 // wait up to EVD_AUTO_POLL_MINS (3 min) for the scheduled auto-loader to fire.
 async function triggerEvdTopUp(neededGhc) {
   const EVD_PURCHASE_TARGET_GHC = parseFloat(process.env.EVD_PURCHASE_TARGET_GHC || '4813');
-  const amount = Math.max(1, Math.round(neededGhc > 0 ? neededGhc : EVD_PURCHASE_TARGET_GHC));
+  const amount = Math.max(1, Math.ceil(neededGhc > 0 ? neededGhc : EVD_PURCHASE_TARGET_GHC));
   const port   = process.env.API_INTERNAL_PORT || 7070;
   try {
     const res  = await fetch(`http://127.0.0.1:${port}/evd/trigger-now`, {

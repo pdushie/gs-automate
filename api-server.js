@@ -1891,7 +1891,7 @@ async function runEvdAutoLoader() {
   // This prevents the portal balance from exceeding the maximum allowed by the EVD API,
   // which would cause requests to be rejected when the balance is already high.
   const EVD_PURCHASE_TARGET_GHC = parseFloat(process.env.EVD_PURCHASE_TARGET_GHC || '4813');
-  const needed = Math.round(EVD_PURCHASE_TARGET_GHC - ghcBalance);
+  const needed = Math.ceil(EVD_PURCHASE_TARGET_GHC - ghcBalance);
 
   const accounts = getEvdAccounts();
   for (const acct of accounts) {
