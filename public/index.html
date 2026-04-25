@@ -1229,11 +1229,23 @@ function applyView() {
   }
 
   // Sort:
-  //   1. Active (IN_PROGRESS/PROCESSING) — currently uploading
-  //   2. Pending/Timeout — by FFD queue position (#1, #2, #3…)
-  //   3. Finished (DONE/FAILED/ABANDONED) — most recently completed first
+  //   • DONE tab — most recently completed first
+  //   • ALL/other tabs:
+  //       1. Active (IN_PROGRESS/PROCESSING) — currently uploading
+  //       2. Pending/Timeout — by FFD queue position (#1, #2, #3…)
+  //       3. Finished (DONE/FAILED/ABANDONED) — most recently completed first
   const FINISHED = new Set(['DONE', 'FAILED', 'ABANDONED']);
   const ACTIVE   = new Set(['IN_PROGRESS', 'PROCESSING']);
+
+  if (tabFilter === 'DONE') {
+    list = [...list].sort((a, b) => {
+      const aTime = a.completedAt || a.failedAt || a.timedOutAt || '';
+      const bTime = b.completedAt || b.failedAt || b.timedOutAt || '';
+      if (bTime > aTime) return  1;
+      if (bTime < aTime) return -1;
+      return a.filename.localeCompare(b.filename);
+    });
+  } else {
   list = [...list].sort((a, b) => {
     const aFin = FINISHED.has(a.status);
     const bFin = FINISHED.has(b.status);
@@ -1262,6 +1274,7 @@ function applyView() {
     if (pa !== pb) return pa - pb;
     return a.filename.localeCompare(b.filename);
   });
+  }
 
   // Badge count on panel title
   document.getElementById('totalBadge').textContent = list.length;

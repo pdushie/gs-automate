@@ -1903,12 +1903,27 @@ async function runEvdAutoLoader() {
       console.log(`🤖 EVD auto-loader: dynamic amount GH¢ ${sendAmount} (configured GH¢ ${acct.amount}, balance GH¢ ${ghcBalance.toFixed(2)}, target GH¢ ${EVD_PURCHASE_TARGET_GHC})`);
     }
     try {
-      const r    = await fetch(`${EVD_API_BASE}/send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await r.json().catch(() => ({}));
+      let r, data;
+      const EVD_SEND_MAX_RETRIES = 3;
+      for (let attempt = 1; attempt <= EVD_SEND_MAX_RETRIES; attempt++) {
+        try {
+          r    = await fetch(`${EVD_API_BASE}/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          data = await r.json().catch(() => ({}));
+          break; // success — exit retry loop
+        } catch (fetchErr) {
+          if (attempt < EVD_SEND_MAX_RETRIES) {
+            const delaySec = attempt * 5;
+            console.warn(`⚠️  EVD auto-loader account ${acct.index} fetch failed (attempt ${attempt}/${EVD_SEND_MAX_RETRIES}): ${fetchErr.message} — retrying in ${delaySec}s`);
+            await new Promise(res => setTimeout(res, delaySec * 1000));
+          } else {
+            throw fetchErr; // rethrow after final attempt
+          }
+        }
+      }
       if (r.ok && data.success) {
         upsertEvdOrder({
           order_id:    data.order_id,
