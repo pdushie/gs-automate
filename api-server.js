@@ -1455,6 +1455,17 @@ app.post('/evd/callback', (req, res) => {
           })()
         : undefined,
     });
+
+    // If a funded order completes, unblock the purchase loop so the bot can
+    // attempt a data purchase once the balance settles.
+    const SUCCESS = ['completed', 'success'];
+    if (status && SUCCESS.includes(status.toLowerCase())) {
+      const sl = loadStatusLog();
+      if (sl._purchaseStatus === 'WAITING_FUNDS') {
+        updateStatusLog({ _purchaseStatus: '' });
+        console.log(`🔓 EVD order #${order_id} completed — cleared WAITING_FUNDS, purchase loop unblocked`);
+      }
+    }
   }
 
   return res.json({ success: true });
@@ -1616,6 +1627,71 @@ app.post('/evd/cancel-stuck', (req, res) => {
   });
   console.log(`✏️  EVD cancel-stuck: ${count} cancelled, ${skipped} skipped (< 20 min old)`);
   return res.json({ success: true, cancelled: count, skipped });
+});
+
+// POST /evd/trigger-now — immediately send an EVD top-up for all configured accounts,
+// bypassing the scheduled poll, threshold check, and settle/in-flight guards.
+// Body: { amount? }  — if provided, overrides each account's configured amount.
+// Accepts internal calls authenticated with X-Internal-Dashboard: 1.
+app.post('/evd/trigger-now', async (req, res) => {
+  const isDashboard = req.headers['x-internal-dashboard'] === '1' || isAuthenticated(req);
+  if (!isDashboard) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const overrideAmount = req.body?.amount != null ? parseFloat(req.body.amount) : null;
+  if (overrideAmount !== null && (isNaN(overrideAmount) || overrideAmount < 1)) {
+    return res.status(400).json({ success: false, error: 'amount must be a number ≥ 1' });
+  }
+
+  const accounts = getEvdAccounts();
+  if (!accounts.length) {
+    return res.status(500).json({ success: false, error: 'No EVD accounts configured' });
+  }
+
+  const results = [];
+  for (const acct of accounts) {
+    const sendAmount = overrideAmount !== null
+      ? Math.min(overrideAmount, acct.amount)   // never exceed configured max per account
+      : acct.amount;
+    const ref = `evans_bot_trigger_${Date.now()}`;
+    const payload = { key: acct.key, phone: acct.phone, amount: sendAmount, network: acct.network, ref };
+    console.log(`⚡ EVD trigger-now: account ${acct.index} — GH¢ ${sendAmount} → ${acct.phone}`);
+    try {
+      const r    = await fetch(`${EVD_API_BASE}/send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.success) {
+        upsertEvdOrder({
+          order_id:    data.order_id,
+          account:     acct.index,
+          phone:       acct.phone,
+          network:     acct.network,
+          amount:      data.amount ?? sendAmount,
+          status:      data.status ?? 'queued',
+          ref:         data.ref ?? ref,
+          chunks:      data.chunks ?? null,
+          sentAt:      new Date().toISOString(),
+          completedAt: null,
+          paidAmount:  null,
+          auto:        true,
+        });
+        console.log(`✅ EVD trigger-now: order #${data.order_id} queued`);
+        results.push({ success: true, account: acct.index, ...data });
+      } else {
+        const msg = data.message || `HTTP ${r.status}`;
+        console.warn(`⚠️  EVD trigger-now account ${acct.index} failed: ${msg}`);
+        results.push({ success: false, account: acct.index, error: msg });
+      }
+    } catch (err) {
+      console.error(`❌ EVD trigger-now account ${acct.index} error: ${err.message}`);
+      results.push({ success: false, account: acct.index, error: err.message });
+    }
+  }
+
+  const allOk = results.every(r => r.success);
+  return res.status(allOk ? 200 : 207).json({ success: allOk, results });
 });
 
 // POST /evd/auto-toggle — enable or disable the auto-loader from the UI.

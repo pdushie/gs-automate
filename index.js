@@ -425,6 +425,30 @@ async function login(page) {
   throw new Error(`Login failed — OTP submission unsuccessful after ${maxSubmitAttempts} attempts`);
 }
 
+// Send an immediate EVD top-up request via the api-server's /evd/trigger-now endpoint.
+// Called when purchaseData detects insufficient GH¢ balance so the bot doesn't have to
+// wait up to EVD_AUTO_POLL_MINS (3 min) for the scheduled auto-loader to fire.
+async function triggerEvdTopUp(neededGhc) {
+  const EVD_PURCHASE_TARGET_GHC = parseFloat(process.env.EVD_PURCHASE_TARGET_GHC || '4813');
+  const amount = Math.max(1, Math.round(neededGhc > 0 ? neededGhc : EVD_PURCHASE_TARGET_GHC));
+  const port   = process.env.API_INTERNAL_PORT || 7070;
+  try {
+    const res  = await fetch(`http://127.0.0.1:${port}/evd/trigger-now`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Dashboard': '1' },
+      body:    JSON.stringify({ amount }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.success) {
+      console.log(`⚡ EVD top-up triggered — GH¢ ${amount} requested`);
+    } else {
+      console.warn(`⚠️  EVD trigger-now failed: ${JSON.stringify(data)}`);
+    }
+  } catch (err) {
+    console.warn(`⚠️  EVD trigger-now call failed: ${err.message}`);
+  }
+}
+
 async function purchaseData(page, context) {
   console.log('\n💳 Starting data purchase...');
 
@@ -440,7 +464,8 @@ async function purchaseData(page, context) {
       const msg = `Insufficient account balance. Required: GH¢ ${REQUIRED.toLocaleString()}, Available: ${displayText}`;
       console.warn(`⚠️  ${msg}`);
       sendAlert('⚠️ MTN GroupShare — Cannot Purchase Data', msg);
-      updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+      updateStatusLog({ _purchaseStatus: 'WAITING_FUNDS', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+      await triggerEvdTopUp(REQUIRED - apiAccountBalance);
       return false;
     }
     console.log(`✅ Account balance sufficient (API pre-check) — proceeding to purchase page`);
@@ -465,7 +490,8 @@ async function purchaseData(page, context) {
     const msg = `Insufficient account balance. Required: GH¢ ${REQUIRED.toLocaleString()}, Available: ${balanceText}`;
     console.warn(`⚠️  ${msg}`);
     sendAlert('⚠️ MTN GroupShare — Cannot Purchase Data', msg);
-    updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+    updateStatusLog({ _purchaseStatus: 'WAITING_FUNDS', _purchaseNote: msg, _purchaseCompletedAt: new Date().toISOString() });
+    await triggerEvdTopUp(REQUIRED - balance);
     return false;
   }
   console.log(`✅ Balance sufficient — proceeding with purchase`);
@@ -1305,7 +1331,7 @@ async function run() {
       // ── Balance check — always fetch real balance (direct API, no navigation overhead) ──
       const { totalMB: currentBalanceMB } = await checkBalance(page, context);
       const purchaseStatusNow = loadStatusLog()._purchaseStatus;
-      if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS') {
+      if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS' && purchaseStatusNow !== 'WAITING_FUNDS') {
         console.log(`💳 Balance is ≤ 90 GB (${(currentBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase before scanning files...`);
         sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(currentBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
         updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
@@ -1389,7 +1415,7 @@ async function run() {
 
       // ── Check balance threshold before building batch ─────────────────────
       const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
-      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS') {
+      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS' && purchaseStatusInLoop !== 'WAITING_FUNDS') {
         console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next batch...`);
         sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
         updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
