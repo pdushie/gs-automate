@@ -901,7 +901,7 @@
 /* ── State ───────────────────────────────── */
 let allFiles       = [];
 let tabFilter      = 'ALL';
-let cdSecs         = 30;
+let cdSecs         = 15;
 let cdTimer        = null;
 let _lastSummaryFP = null; // fingerprint of last rendered summary
 let _searchDebounce = null;
@@ -1364,31 +1364,37 @@ async function doRefresh() {
     .then(b => applyFreshBalance(b))
     .catch(() => {});
 
-  try {
-    const d = await fetchSummary();
-    if (!d) return; // null = 401 redirect in progress
-    const fp = summaryFingerprint(d);
-    const changed = fp !== _lastSummaryFP;
-    _lastSummaryFP = fp;
-    if (d.files) allFiles = d.files;
-    renderStats(d);
-    if (changed) applyView(); // skip full table rebuild if nothing changed
-    const t = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
-    document.getElementById('ts').textContent = `Updated ${t}`;
-  } catch (e) {
-    console.error('Refresh failed:', e);
-    document.getElementById('ts').textContent = 'Refresh failed';
-  }
+  await doSummaryRefresh();
 
   btn.disabled    = false;
   icon.textContent = '↻';
-  cdSecs = 30;
+  cdSecs = FAST_INTERVAL;
+  balanceCdSecs = BALANCE_INTERVAL;
   // restore progress bar to full, then re-enable linear transition
   const barEl = document.getElementById('refreshBar');
   if (barEl) {
     barEl.style.transition = 'none';
     barEl.style.width = '100%';
-    setTimeout(() => { barEl.style.transition = 'width 1s linear'; }, 60);
+    setTimeout(() => { barEl.style.transition = `width 1s linear`; }, 60);
+  }
+}
+
+// Lightweight refresh — only fetches /summary (no MTN portal API call).
+async function doSummaryRefresh() {
+  try {
+    const d = await fetchSummary();
+    if (!d) return;
+    const fp = summaryFingerprint(d);
+    const changed = fp !== _lastSummaryFP;
+    _lastSummaryFP = fp;
+    if (d.files) allFiles = d.files;
+    renderStats(d);
+    if (changed) applyView();
+    const t = new Date().toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    document.getElementById('ts').textContent = `Updated ${t}`;
+  } catch (e) {
+    console.error('Refresh failed:', e);
+    document.getElementById('ts').textContent = 'Refresh failed';
   }
 }
 
@@ -1399,14 +1405,26 @@ function setProgressBar(fraction) {
 }
 
 /* ── Countdown ───────────────────────────── */
+const FAST_INTERVAL    = 15;  // seconds — summary-only refresh
+const BALANCE_INTERVAL = 30;  // seconds — full refresh including MTN portal balance
+let balanceCdSecs = BALANCE_INTERVAL;
 function startCountdown() {
   clearInterval(cdTimer);
   cdTimer = setInterval(() => {
     cdSecs--;
-    setProgressBar(cdSecs / 30);
-    if (cdSecs <= 0) {
-      cdSecs = 30;
+    balanceCdSecs--;
+    setProgressBar(cdSecs / FAST_INTERVAL);
+    if (balanceCdSecs <= 0) {
+      // Full refresh (summary + balance) every 30 s
+      balanceCdSecs = BALANCE_INTERVAL;
+      cdSecs = FAST_INTERVAL;
       doRefresh();
+    } else if (cdSecs <= 0) {
+      // Fast summary-only refresh every 5 s
+      cdSecs = FAST_INTERVAL;
+      const barEl = document.getElementById('refreshBar');
+      if (barEl) { barEl.style.transition = 'none'; barEl.style.width = '100%'; setTimeout(() => { barEl.style.transition = `width 1s linear`; }, 60); }
+      doSummaryRefresh();
     }
   }, 1000);
 }

@@ -21,7 +21,7 @@ function escapeHtml(str) {
 }
 
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
-const IDLE_REFRESH_INTERVAL = 1 * 60 * 1000;
+const IDLE_REFRESH_INTERVAL = 25 * 1000;
 
 // Transient network error patterns — these are portal/connection blips, not code bugs.
 const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::/i;
@@ -208,7 +208,7 @@ async function sendCallback(filename, status, completedAt, orderOverride = null)
 
 // Sleep for `ms` ms, but wake every `checkIntervalMs` to check for a balance refresh,
 // purchase request, or newly received file. Returns true if woken early, false if full duration elapsed.
-async function interruptibleSleep(ms, checkIntervalMs = 15000) {
+async function interruptibleSleep(ms, checkIntervalMs = 5000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
     const remaining = end - Date.now();
@@ -1014,7 +1014,7 @@ async function uploadFile(page, excelFile) {
   }
 
   const maxAttempts = 70;
-  const pollInterval = 20000;
+  const pollInterval = 15000;
   let isDone = false;
   let isFailed = false;
 
@@ -1523,7 +1523,7 @@ async function run() {
         }
       }
 
-      console.log(`\n⏳ Batch complete. Next scan in 1 min...`);
+      console.log(`\n⏳ Batch complete. Next scan in 25 sec...`);
       await interruptibleSleep(IDLE_REFRESH_INTERVAL);
     }
 
