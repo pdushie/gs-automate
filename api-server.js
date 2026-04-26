@@ -1121,6 +1121,84 @@ app.post('/retry-callback', async (req, res) => {
 });
 
 
+// POST /files/mark-abandoned — manually mark a file as ABANDONED in the local status log.
+// Optionally sends an ABANDONED callback to the order system.
+// Body: { filename, sendCallback? (default false) }
+app.post('/files/mark-abandoned', async (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  const { filename, sendCallback: doSendCallback = false } = req.body || {};
+  if (!filename || typeof filename !== 'string') {
+    return res.status(400).json({ success: false, error: 'filename is required' });
+  }
+
+  const abandonedAt = new Date().toISOString();
+
+  // Update local status log
+  withFileLock(STATUS_LOG, () => {
+    const l = loadStatusLog();
+    if (typeof l[filename] === 'object' && l[filename] !== null) {
+      // Merged batch record
+      l[filename] = { ...l[filename], status: 'ABANDONED', timedOutAt: abandonedAt };
+    } else {
+      l[filename] = 'ABANDONED';
+      l[`${filename}_timedOutAt`] = abandonedAt;
+    }
+    atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+  });
+
+  // Add to uploaded list so the bot stops tracking it
+  withFileLock(UPLOADED_LOG, () => {
+    const uploaded = loadUploadedLog();
+    if (!uploaded.includes(filename)) {
+      uploaded.push(filename);
+      atomicWrite(UPLOADED_LOG, JSON.stringify(uploaded, null, 2));
+    }
+  });
+
+  console.log(`🚫 "${filename}" manually marked as ABANDONED`);
+
+  // Optionally fire an ABANDONED callback to the order system
+  let callbackResult = null;
+  if (doSendCallback) {
+    const orderSystemUrl = process.env.ORDERSYSTEM_URL;
+    const secret         = process.env.GROUPSHARE_CALLBACK_SECRET;
+    if (orderSystemUrl && secret) {
+      const statusLog = loadStatusLog();
+      let resolvedOrderIds = statusLog[`${filename}_orderIds`] || null;
+      let resolvedOrderId  = statusLog[`${filename}_orderId`]  || null;
+      if (!resolvedOrderIds && !resolvedOrderId) {
+        for (const [, val] of Object.entries(statusLog)) {
+          if (typeof val !== 'object' || !val.sourceFiles) continue;
+          const src = val.sourceFiles.find(s => s.filename === filename);
+          if (src) {
+            if (src.orderIds) { resolvedOrderIds = src.orderIds; break; }
+            if (src.orderId)  { resolvedOrderId  = src.orderId;  break; }
+          }
+        }
+      }
+      const payload = { filename, status: 'ABANDONED', completedAt: abandonedAt };
+      if (resolvedOrderIds) payload.orderIds = resolvedOrderIds;
+      else if (resolvedOrderId) payload.orderId = resolvedOrderId;
+      try {
+        const cbRes = await fetch(
+          `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+        );
+        callbackResult = { sent: true, httpStatus: cbRes.status };
+        console.log(`📤 ABANDONED callback sent for "${filename}" — HTTP ${cbRes.status}`);
+      } catch (err) {
+        callbackResult = { sent: false, error: err.message };
+        console.warn(`⚠️  ABANDONED callback failed for "${filename}": ${err.message}`);
+      }
+    } else {
+      callbackResult = { sent: false, error: 'ORDERSYSTEM_URL or GROUPSHARE_CALLBACK_SECRET not configured' };
+    }
+  }
+
+  return res.json({ success: true, filename, abandonedAt, callbackResult });
+});
+
 // GET /health — fast liveness probe for Render / uptime monitors.
 // Response is pre-built every 5 s by a setInterval so the handler does
 // zero work at request time — responds instantly even under heavy load.
@@ -1475,12 +1553,11 @@ app.post('/evd/callback', (req, res) => {
       paidAmount:  paid_amount ?? undefined,
       ref:         ref         ?? undefined,
       chunks:      chunks      ?? undefined,
+      // gbeyfia sends timestamps in UTC/GMT+0 — store as-is, no adjustment needed
       completedAt: isTerminal
-        ? (() => {
-            const raw = timestamp ? new Date(timestamp) : new Date();
-            return new Date(raw.getTime() - 3 * 60 * 60 * 1000).toISOString();
-          })()
+        ? (timestamp ? new Date(timestamp) : new Date()).toISOString()
         : undefined,
+      _completedAtUtcFixed: isTerminal ? true : undefined,
     });
 
     // If a funded order completes, unblock the purchase loop so the bot can
@@ -1498,24 +1575,30 @@ app.post('/evd/callback', (req, res) => {
   return res.json({ success: true });
 });
 
-// ── One-time migration: subtract 3 h from completedAt on all existing EVD records ────────
-// Records are tagged _completedAt3hFixed=true so this is idempotent across restarts.
+// ── One-time migration: add 3 h back to completedAt on records previously wrongly adjusted ────
+// gbeyfia sends UTC/GMT+0 timestamps.  An earlier deploy incorrectly subtracted 3 h from
+// completedAt on both new callbacks and existing records.  This migration undoes that:
+//   • Records tagged _completedAt3hFixed=true had 3 h subtracted by the old migration  → +3 h
+//   • Records without that tag but with completedAt were written by the callback handler
+//     which also subtracted 3 h at the time  → +3 h
+//   • Records already tagged _completedAtUtcFixed=true are already correct  → skip
 {
   let migrated = 0;
   try {
     withFileLock(EVD_LOG, () => {
       const orders = loadEvdLog();
       const fixed  = orders.map(o => {
-        if (o._completedAt3hFixed || !o.completedAt) return o;
-        const corrected = new Date(new Date(o.completedAt).getTime() - 3 * 60 * 60 * 1000).toISOString();
+        if (o._completedAtUtcFixed || !o.completedAt) return o;
+        const corrected = new Date(new Date(o.completedAt).getTime() + 3 * 60 * 60 * 1000).toISOString();
         migrated++;
-        return { ...o, completedAt: corrected, _completedAt3hFixed: true };
+        // Carry _completedAt3hFixed forward so logs are transparent, add the new flag
+        return { ...o, completedAt: corrected, _completedAtUtcFixed: true };
       });
       if (migrated > 0) saveEvdLog(fixed);
     });
-    if (migrated > 0) console.log(`✅ EVD migration: subtracted 3 h from completedAt on ${migrated} record(s)`);
+    if (migrated > 0) console.log(`✅ EVD migration: restored UTC completedAt on ${migrated} EVD record(s) (+3 h correction)`);
   } catch (err) {
-    console.warn(`⚠️  EVD migration failed: ${err.message}`);
+    console.warn(`⚠️  EVD UTC migration failed: ${err.message}`);
   }
 }
 

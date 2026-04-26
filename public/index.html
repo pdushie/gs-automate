@@ -883,7 +883,7 @@
     <div class="modal-field" style="display:flex;align-items:flex-start;gap:10px;padding:10px 13px;background:rgba(59,130,246,0.07);border:1px solid rgba(59,130,246,0.2);border-radius:7px">
       <input type="checkbox" id="rcMarkLocal" checked style="margin-top:3px;accent-color:var(--accent);flex-shrink:0" />
       <div>
-        <label for="rcMarkLocal" style="font-size:0.82rem;color:var(--text);cursor:pointer">Also mark as Done locally</label>
+        <label for="rcMarkLocal" style="font-size:0.82rem;color:var(--text);cursor:pointer">Update local status</label>
         <div class="modal-hint" style="margin-top:2px">Updates the local status log and marks the file as uploaded so the bot stops tracking it as active. Use this for files stuck in processing that you know have already been processed by MTN.</div>
       </div>
     </div>
@@ -1191,7 +1191,7 @@ function renderTable(files, q) {
       <td style="color:var(--muted);font-size:0.75rem;padding-right:12px"><span class="row-chevron" id="chev-${detId}">&#9660;</span></td>
     </tr>
     <tr class="detail-row" id="${detId}">
-      <td colspan="8"><div class="detail-collapse"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button></div></div></div></td>
+      <td colspan="8"><div class="detail-collapse"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;gap:6px;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3)" data-filename="${esc(f.filename)}" onclick="event.stopPropagation();markAbandoned(this.dataset.filename)">🚫 Mark Abandoned</button></div></div></div></td>
     </tr>`;
   }).join('');
 }
@@ -1759,6 +1759,33 @@ async function evdSendAll() {
   } catch (err) {
     btn.textContent = '❌ Error';
     setTimeout(() => { btn.textContent = '💸 Send Airtime'; btn.disabled = false; }, 3000);
+  }
+}
+
+/* ── Mark Abandoned ─────────────────────── */
+async function markAbandoned(filename) {
+  const sendCb = confirm(`Mark "${filename}" as ABANDONED?\n\nClick OK to abandon without sending a callback.\nClick Cancel to abort.`);
+  if (sendCb === null) return; // cancelled
+  const doCallback = confirm('Send an ABANDONED callback to the order system?\n\nClick OK to send callback.\nClick Cancel to skip callback.');
+
+  try {
+    const r = await fetch('/files/mark-abandoned', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename, sendCallback: doCallback }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.success) {
+      const cbNote = doCallback
+        ? (d.callbackResult?.sent ? ` · callback sent (HTTP ${d.callbackResult.httpStatus})` : ` · callback failed: ${d.callbackResult?.error}`)
+        : ' · no callback sent';
+      alert(`✅ "${filename}" marked as ABANDONED${cbNote}`);
+      doRefresh();
+    } else {
+      alert(`❌ Failed: ${d.error || `HTTP ${r.status}`}`);
+    }
+  } catch (err) {
+    alert(`❌ Request failed: ${err.message}`);
   }
 }
 
