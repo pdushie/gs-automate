@@ -1553,11 +1553,14 @@ app.post('/evd/callback', (req, res) => {
       paidAmount:  paid_amount ?? undefined,
       ref:         ref         ?? undefined,
       chunks:      chunks      ?? undefined,
-      // gbeyfia sends timestamps in UTC/GMT+0 — store as-is, no adjustment needed
+      // gbeyfia sends timestamps in UTC+4 — subtract 4 h to store as UTC
+      // Fall back to server time (already UTC on Render) when no timestamp provided
       completedAt: isTerminal
-        ? (timestamp ? new Date(timestamp) : new Date()).toISOString()
+        ? (timestamp
+            ? new Date(new Date(timestamp).getTime() - 4 * 60 * 60 * 1000).toISOString()
+            : new Date().toISOString())
         : undefined,
-      _completedAtUtcFixed: isTerminal ? true : undefined,
+      _completedAtUtcV2Fixed: isTerminal ? true : undefined,
     });
 
     // If a funded order completes, unblock the purchase loop so the bot can
@@ -1575,28 +1578,24 @@ app.post('/evd/callback', (req, res) => {
   return res.json({ success: true });
 });
 
-// ── One-time migration: add 3 h back to completedAt on records previously wrongly adjusted ────
-// gbeyfia sends UTC/GMT+0 timestamps.  An earlier deploy incorrectly subtracted 3 h from
-// completedAt on both new callbacks and existing records.  This migration undoes that:
-//   • Records tagged _completedAt3hFixed=true had 3 h subtracted by the old migration  → +3 h
-//   • Records without that tag but with completedAt were written by the callback handler
-//     which also subtracted 3 h at the time  → +3 h
-//   • Records already tagged _completedAtUtcFixed=true are already correct  → skip
+// ── One-time migration: subtract 4 h from completedAt on all existing EVD records ─────────────
+// gbeyfia sends UTC+4 timestamps.  All records not yet tagged _completedAtUtcV2Fixed have
+// completedAt stored at UTC+4 (raw gbeyfia value) and need 4 h subtracted to reach true UTC.
+// The flag makes this idempotent across restarts.
 {
   let migrated = 0;
   try {
     withFileLock(EVD_LOG, () => {
       const orders = loadEvdLog();
       const fixed  = orders.map(o => {
-        if (o._completedAtUtcFixed || !o.completedAt) return o;
-        const corrected = new Date(new Date(o.completedAt).getTime() + 3 * 60 * 60 * 1000).toISOString();
+        if (o._completedAtUtcV2Fixed || !o.completedAt) return o;
+        const corrected = new Date(new Date(o.completedAt).getTime() - 4 * 60 * 60 * 1000).toISOString();
         migrated++;
-        // Carry _completedAt3hFixed forward so logs are transparent, add the new flag
-        return { ...o, completedAt: corrected, _completedAtUtcFixed: true };
+        return { ...o, completedAt: corrected, _completedAtUtcV2Fixed: true };
       });
       if (migrated > 0) saveEvdLog(fixed);
     });
-    if (migrated > 0) console.log(`✅ EVD migration: restored UTC completedAt on ${migrated} EVD record(s) (+3 h correction)`);
+    if (migrated > 0) console.log(`✅ EVD migration: corrected completedAt to UTC on ${migrated} EVD record(s) (-4 h from UTC+4)`);
   } catch (err) {
     console.warn(`⚠️  EVD UTC migration failed: ${err.message}`);
   }
