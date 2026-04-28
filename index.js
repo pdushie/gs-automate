@@ -1200,13 +1200,18 @@ async function uploadFile(page, excelFile) {
 async function run() {
   await startServer();
 
-  // Reset any purchase status that got stuck as IN_PROGRESS from a previous
-  // session that was killed mid-purchase. On a fresh start there is no active
-  // purchase, so IN_PROGRESS is always stale.
+  // Reset any purchase status that got stuck from a previous session:
+  //  • IN_PROGRESS  — bot was killed mid-purchase; no active purchase on fresh start
+  //  • WAITING_FUNDS — GH¢ was low last session; EVD may have topped up in the meantime,
+  //                    so re-attempt immediately rather than waiting for a callback that
+  //                    may never arrive (e.g. if it already came while bot was down)
   const stuckPurchaseStatus = loadStatusLog()._purchaseStatus;
   if (stuckPurchaseStatus === 'IN_PROGRESS') {
     console.warn('⚠️  Resetting stale _purchaseStatus IN_PROGRESS → FAILED on startup');
     updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: 'Reset on restart — previous purchase session interrupted' });
+  } else if (stuckPurchaseStatus === 'WAITING_FUNDS') {
+    console.warn('⚠️  Resetting stale _purchaseStatus WAITING_FUNDS → "" on startup (will re-check GH¢ balance)');
+    updateStatusLog({ _purchaseStatus: '', _purchaseNote: 'Reset on restart — will re-attempt purchase if GH¢ is now sufficient' });
   }
 
   // ── Crash-recovery for in-flight batches ────────────────────────────────
