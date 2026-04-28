@@ -1374,6 +1374,27 @@ async function run() {
         const idleLog = loadStatusLog();
         const idleBalanceMB = idleLog._lastBalanceMB || 0;
 
+        // Even with no pending files, trigger auto-purchase if balance is below threshold.
+        // This ensures stock is replenished before the next batch of files arrives.
+        {
+          const idlePurchaseStatus = idleLog._purchaseStatus;
+          if (idleBalanceMB > 0 && idleBalanceMB <= 90 * 1024
+              && idlePurchaseStatus !== 'IN_PROGRESS'
+              && idlePurchaseStatus !== 'WAITING_FUNDS') {
+            console.log(`💳 [Idle] Balance is ≤ 90 GB (${(idleBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase while idle...`);
+            sendAlert('💳 MTN GroupShare — Auto-Purchase (Idle)', `Balance is ${(idleBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
+            updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
+            try {
+              await purchaseData(page, context);
+            } catch (purchaseErr) {
+              console.error(`❌ Idle auto-purchase failed: ${purchaseErr.message}`);
+              sendAlert('❌ MTN GroupShare — Idle Auto-Purchase Failed', purchaseErr.message);
+              updateStatusLog({ _purchaseStatus: 'FAILED', _purchaseNote: purchaseErr.message, _purchaseCompletedAt: new Date().toISOString() });
+            }
+            continue;
+          }
+        }
+
         // Keep-alive: reload the portal page if we haven't navigated there recently.
         // Prevents the MTN portal from killing the browser session due to inactivity.
         if (Date.now() - _lastPortalNavAt >= KEEP_ALIVE_INTERVAL_MS) {
