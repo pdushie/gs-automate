@@ -675,8 +675,15 @@ function resolveFileStatus(filename, uploaded, statusLog) {
     };
   }
 
-  // 4. Default — file received but not yet processed
-  return { status: 'PENDING', completedAt: null, queuedAt: null, orderId: null, orderIds: null, mergedBatch: null };
+  // 4. Default — file received but not yet picked up by the bot
+  return {
+    status:      'PENDING',
+    completedAt: null,
+    queuedAt:    statusLog[filename + '_queuedAt'] || null,
+    orderId:     statusLog[filename + '_orderId']  || null,
+    orderIds:    statusLog[filename + '_orderIds'] || null,
+    mergedBatch: null,
+  };
 }
 
 // GET /status — get status of all files
