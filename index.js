@@ -772,6 +772,73 @@ function buildMergedFile(files) {
   return { mergedFile, sourceFiles };
 }
 
+// ── OPTIMAL BIN-PACKER ───────────────────────────────────────────────────────
+// Finds the subset of files whose combined allocation is as large as possible
+// without exceeding availableMB.  This maximises balance consumption so the
+// leftover after each cycle is as small as possible — ideally < 90 GB so the
+// auto-purchase threshold is crossed and a new bundle is purchased immediately.
+//
+// Algorithm: branch-and-bound over files sorted largest-first, with a suffix-sum
+// upper bound that lets whole subtrees be pruned.  Terminates early when a
+// solution within 90 GB of availableMB is found, or after a 500 ms deadline.
+// Falls back gracefully to the best result found so far.
+function findOptimalBatch(files, availableMB) {
+  if (files.length === 0) return [];
+
+  const TARGET_LEFTOVER_MB = 90 * 1024; // stop searching once within 90 GB
+  const DEADLINE_MS = 500;
+  const deadline = Date.now() + DEADLINE_MS;
+
+  // Sort largest-first — gives a good greedy baseline on the first branch
+  // AND enables the tightest upper-bound pruning.
+  const sorted = [...files].sort((a, b) => b.totalMB - a.totalMB);
+
+  // Suffix sums — suffixSum[i] = sum of sorted[i..n-1]
+  const suffixSum = new Array(sorted.length + 1).fill(0);
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    suffixSum[i] = suffixSum[i + 1] + sorted[i].totalMB;
+  }
+
+  let bestTotal = 0;
+  let bestIndices = [];
+  let timedOut = false;
+
+  const stack = [{ idx: 0, total: 0, indices: [] }];
+
+  while (stack.length > 0 && !timedOut) {
+    if (Date.now() > deadline) { timedOut = true; break; }
+
+    const { idx, total, indices } = stack.pop();
+
+    if (total > bestTotal) {
+      bestTotal = total;
+      bestIndices = indices;
+    }
+
+    // Early-exit: already within the target leftover
+    if (availableMB - total < TARGET_LEFTOVER_MB) break;
+
+    // Pruning: adding all remaining files can't beat bestTotal
+    if (total + suffixSum[idx] <= bestTotal) continue;
+
+    for (let i = sorted.length - 1; i >= idx; i--) {
+      const next = total + sorted[i].totalMB;
+      if (next <= availableMB) {
+        // Upper-bound check before pushing
+        if (next + suffixSum[i + 1] > bestTotal) {
+          stack.push({ idx: i + 1, total: next, indices: [...indices, i] });
+        }
+      }
+    }
+  }
+
+  const result = bestIndices.map(i => sorted[i]);
+  const leftoverGB = ((availableMB - bestTotal) / 1024).toFixed(2);
+  console.log(`📊 Batch optimizer: using ${(bestTotal / 1024).toFixed(2)} GB of ${(availableMB / 1024).toFixed(2)} GB — leftover ${leftoverGB} GB`
+    + (timedOut ? ' (time-limited)' : ''));
+  return result;
+}
+
 async function uploadFile(page, excelFile) {
   const fileName = path.basename(excelFile.name, path.extname(excelFile.name));
   console.log(`\n${'='.repeat(60)}`);
@@ -1449,17 +1516,13 @@ async function run() {
       }
 
       if (!autoPurchaseTriggered) {
-        // ── Bin-pack: greedily select files whose combined total fits balance ─
-        const batch = [];
-        let batchMB = 0;
-        for (const f of pendingFiles) {
-          if (batchMB + f.totalMB <= availableMB) {
-            batch.push(f);
-            batchMB += f.totalMB;
-          } else {
-            skippedDueToBalance++;
-          }
-        }
+        // ── Optimal bin-pack: maximise balance consumption ────────────────────
+        // findOptimalBatch picks the combination of files that uses as much of
+        // availableMB as possible so the post-upload leftover is < 90 GB and
+        // auto-purchase triggers automatically.
+        const batch = findOptimalBatch(pendingFiles, availableMB);
+        const batchMB = batch.reduce((s, f) => s + f.totalMB, 0);
+        skippedDueToBalance = pendingFiles.filter(f => !batch.includes(f)).length;
 
         if (batch.length === 0) {
           skippedDueToBalance = pendingFiles.length;
