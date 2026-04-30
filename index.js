@@ -1292,6 +1292,8 @@ async function uploadFile(page, excelFile) {
         if (splitLog[`${excelFile.name}_isSplitIntermediate`]) {
           // Part A — no callback; order is not complete until Part B uploads
           console.log(`✂️  Split Part A "${excelFile.name}" DONE — holding callback until Part B ("${splitLog[`${excelFile.name}_partnerPart`]}") completes`);
+          // Wake the main loop immediately so Part B is picked up without waiting for idle sleep
+          updateStatusLog({ _fileReceived: true });
         } else {
           await sendCallback(excelFile.name, 'DONE', completedAt);
         }
@@ -1698,8 +1700,7 @@ async function run() {
             const splitLog = loadStatusLog();
             const splitCandidate = [...pendingFiles]
               .filter(f => f.totalMB > 0
-                && !splitLog[`${f.name}_isSplitIntermediate`]  // don't re-split Part A
-                && !splitLog[`${f.name}_isSplitFinal`])        // don't re-split Part B
+                && !splitLog[`${f.name}_isSplitIntermediate`]) // don't re-split Part A (still in-flight)
               .sort((a, b) => a.totalMB - b.totalMB)[0]; // smallest file = least overshoot
             if (splitCandidate) {
               try {
