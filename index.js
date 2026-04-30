@@ -266,6 +266,7 @@ function getPendingFiles(folderPath) {
       if (f.startsWith('NM-merged-')) return false; // temp merged files — never process as source
       if (uploaded.includes(f)) return false;
       if (statusLog[f] === 'ABANDONED') return false;
+      if (statusLog[f] === 'SPLIT') return false; // original file already split into parts — parts are pending
       if (lockedSourceFiles.has(f)) return false; // owned by an active batch — do not re-queue
       return true;
     })
@@ -839,6 +840,116 @@ function findOptimalBatch(files, availableMB) {
   return result;
 }
 
+// ── ROW-LEVEL FILE SPLITTER ───────────────────────────────────────────────────
+// When no pending file fits the available balance and balance > 90 GB (so
+// auto-purchase won't fire), the bot is deadlocked.  This function breaks the
+// deadlock by splitting the smallest pending file into two parts:
+//   Part A — rows whose cumulative MB fits within availableMB — uploaded now.
+//   Part B — remaining rows — uploaded after balance is replenished.
+//
+// Both parts carry the original orderId/orderIds for manual traceability.
+// Only Part B sends a callback to the order system (signalling the full order
+// is complete); Part A is treated as an intermediate chunk with no callback.
+//
+// Original file is deleted from disk; status log records it as 'SPLIT'.
+// Returns { partAFile, partBFile } on success.  Throws on unrecoverable errors.
+function splitFileToFitBalance(file, availableMB) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const partAName = `NM-split-${timestamp}-a-${file.name}`;
+  const partBName = `NM-split-${timestamp}-b-${file.name}`;
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  const partAPath  = path.join(folderPath, partAName);
+  const partBPath  = path.join(folderPath, partBName);
+  const dataMBColIndex = 3;
+
+  const workbook = XLSX.readFile(file.fullPath);
+  const sheet    = workbook.Sheets[workbook.SheetNames[0]];
+  const rawRows  = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+  if (rawRows.length < 2) throw new Error(`splitFileToFitBalance: "${file.name}" has no data rows`);
+
+  const header   = rawRows[0];
+  const partARows = [];
+  const partBRows = [];
+  let runningMB   = 0;
+
+  for (let r = 1; r < rawRows.length; r++) {
+    const row = rawRows[r];
+    if (!row || row.length === 0) continue;
+    const mb = parseFloat(row[dataMBColIndex]) || 0;
+    if (runningMB + mb <= availableMB) {
+      runningMB += mb;
+      partARows.push(row);
+    } else {
+      partBRows.push(row);
+    }
+  }
+
+  if (partARows.length === 0) {
+    throw new Error(`splitFileToFitBalance: first row alone exceeds available balance (${(availableMB / 1024).toFixed(2)} GB) — cannot split`);
+  }
+  if (partBRows.length === 0) {
+    throw new Error(`splitFileToFitBalance: all rows fit — split is unnecessary`);
+  }
+
+  // Write Part A
+  const wbA = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbA, XLSX.utils.aoa_to_sheet([header, ...partARows]), 'Sheet1');
+  XLSX.writeFile(wbA, partAPath);
+
+  // Write Part B
+  const wbB = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wbB, XLSX.utils.aoa_to_sheet([header, ...partBRows]), 'Sheet1');
+  XLSX.writeFile(wbB, partBPath);
+
+  const partAMB = partARows.reduce((s, r) => s + (parseFloat(r[dataMBColIndex]) || 0), 0);
+  const partBMB = partBRows.reduce((s, r) => s + (parseFloat(r[dataMBColIndex]) || 0), 0);
+
+  // Carry order IDs from the original file to both parts (for manual traceability)
+  const log = loadStatusLog();
+  const orderUpdates = {};
+  if (log[`${file.name}_orderIds`]) {
+    orderUpdates[`${partAName}_orderIds`] = log[`${file.name}_orderIds`];
+    orderUpdates[`${partBName}_orderIds`] = log[`${file.name}_orderIds`];
+  } else if (log[`${file.name}_orderId`]) {
+    orderUpdates[`${partAName}_orderId`] = log[`${file.name}_orderId`];
+    orderUpdates[`${partBName}_orderId`] = log[`${file.name}_orderId`];
+  }
+
+  updateStatusLog({
+    // Original — mark as SPLIT so it is not re-queued
+    [file.name]: 'SPLIT',
+    [`${file.name}_splitAt`]:   new Date().toISOString(),
+    [`${file.name}_splitPartA`]: partAName,
+    [`${file.name}_splitPartB`]: partBName,
+    // Part A — intermediate, no callback on completion
+    [partAName]: 'PENDING',
+    [`${partAName}_isSplitIntermediate`]: true,
+    [`${partAName}_originalFile`]:        file.name,
+    [`${partAName}_partnerPart`]:         partBName,
+    // Part B — final, sends callback on completion
+    [partBName]: 'PENDING',
+    [`${partBName}_isSplitFinal`]:   true,
+    [`${partBName}_originalFile`]:   file.name,
+    ...orderUpdates,
+  });
+
+  // Delete the original file from disk — both parts are now pending
+  try { fs.unlinkSync(file.fullPath); } catch {}
+
+  const msg = `"${file.name}" split to drain balance.\n`
+    + `Part A: ${(partAMB / 1024).toFixed(2)} GB (${partARows.length} rows) — uploading now\n`
+    + `Part B: ${(partBMB / 1024).toFixed(2)} GB (${partBRows.length} rows) — uploads after replenishment\n`
+    + `Callback held until Part B completes.`;
+  console.log(`✂️  ${msg}`);
+  sendAlert('✂️ MTN GroupShare — File Split', msg);
+
+  return {
+    partAFile: { name: partAName, fullPath: partAPath, totalMB: partAMB, mtime: fs.statSync(partAPath).mtime },
+    partBFile: { name: partBName, fullPath: partBPath, totalMB: partBMB, mtime: fs.statSync(partBPath).mtime },
+  };
+}
+
 async function uploadFile(page, excelFile) {
   const fileName = path.basename(excelFile.name, path.extname(excelFile.name));
   console.log(`\n${'='.repeat(60)}`);
@@ -1034,8 +1145,23 @@ async function uploadFile(page, excelFile) {
             [`${excelFile.name}_timedOutAt`]: timedOutAt,
             [`${excelFile.name}_retryCount`]: retryCount,
           });
-          sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
-          await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+          const navAbandonLog = loadStatusLog();
+          if (navAbandonLog[`${excelFile.name}_isSplitIntermediate`]) {
+            // Part A abandoned — cascade abandon Part B so the order doesn't remain half-done
+            const partBName = navAbandonLog[`${excelFile.name}_partnerPart`];
+            if (partBName) {
+              updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: timedOutAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was abandoned` });
+              try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
+              sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) failed navigation ${retryCount} times.\nPart B "${partBName}" also abandoned. Sending ABANDONED callback.`);
+              await sendCallback(partBName, 'ABANDONED', timedOutAt);
+            } else {
+              sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+              await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+            }
+          } else {
+            sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+            await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+          }
         }
         console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
       } else {
@@ -1155,13 +1281,20 @@ async function uploadFile(page, excelFile) {
         try { fs.unlinkSync(excelFile.fullPath); } catch {}
         markAsUploaded(excelFile.name);
       } else {
-        // ── Single file (legacy path) ─────────────────────────────────────
+        // ── Single file / split part ──────────────────────────────────────
         markAsUploaded(excelFile.name);
         updateStatusLog({
           [excelFile.name]: 'DONE',
           [`${excelFile.name}_completedAt`]: completedAt,
         });
-        await sendCallback(excelFile.name, 'DONE', completedAt);
+
+        const splitLog = loadStatusLog();
+        if (splitLog[`${excelFile.name}_isSplitIntermediate`]) {
+          // Part A — no callback; order is not complete until Part B uploads
+          console.log(`✂️  Split Part A "${excelFile.name}" DONE — holding callback until Part B ("${splitLog[`${excelFile.name}_partnerPart`]}") completes`);
+        } else {
+          await sendCallback(excelFile.name, 'DONE', completedAt);
+        }
       }
 
       await page.screenshot({ path: `done-${fileName}.png` });
@@ -1190,7 +1323,21 @@ async function uploadFile(page, excelFile) {
           [excelFile.name]: 'FAILED',
           [`${excelFile.name}_failedAt`]: failedAt,
         });
-        sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
+        const failLog = loadStatusLog();
+        if (failLog[`${excelFile.name}_isSplitIntermediate`]) {
+          // Part A failed — cascade abandon Part B so the order doesn't appear complete
+          const partBName = failLog[`${excelFile.name}_partnerPart`];
+          if (partBName) {
+            updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: failedAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was FAILED by MTN` });
+            try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
+            sendAlert('❌ MTN GroupShare — Split Part A Failed', `"${excelFile.name}" (split Part A) was FAILED by MTN.\nPart B "${partBName}" abandoned. Sending ABANDONED callback.`);
+            await sendCallback(partBName, 'ABANDONED', failedAt);
+          } else {
+            sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
+          }
+        } else {
+          sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
+        }
       }
       await page.screenshot({ path: `failed-${fileName}.png` });
       console.error(`❌ ${excelFile.name} — FAILED on MTN's end`);
@@ -1229,8 +1376,23 @@ async function uploadFile(page, excelFile) {
           [`${excelFile.name}_timedOutAt`]: timedOutAt,
           [`${excelFile.name}_retryCount`]: retryCount,
         });
-        sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
-        await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+        const pollAbandonLog = loadStatusLog();
+        if (pollAbandonLog[`${excelFile.name}_isSplitIntermediate`]) {
+          // Part A abandoned — cascade abandon Part B so the order doesn't remain half-done
+          const partBName = pollAbandonLog[`${excelFile.name}_partnerPart`];
+          if (partBName) {
+            updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: timedOutAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was abandoned` });
+            try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
+            sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) timed out ${retryCount} times.\nPart B "${partBName}" also abandoned. Sending ABANDONED callback.`);
+            await sendCallback(partBName, 'ABANDONED', timedOutAt);
+          } else {
+            sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
+            await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+          }
+        } else {
+          sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
+          await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+        }
       }
       console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} timeout(s)`);
       await page.screenshot({ path: `abandoned-${fileName}.png` });
@@ -1526,6 +1688,30 @@ async function run() {
 
         if (batch.length === 0) {
           skippedDueToBalance = pendingFiles.length;
+
+          // ── Balance-drain deadlock breaker ────────────────────────────────
+          // No file fits AND balance is above the auto-purchase threshold, so
+          // the system would loop idle forever.  Split the smallest pending
+          // file into Part A (fits now) + Part B (uploads after replenishment).
+          // Only runs when explicitly enabled from the dashboard (_splitEnabled).
+          if (availableMB > AUTO_PURCHASE_THRESHOLD_MB && loadStatusLog()._splitEnabled === true) {
+            const splitLog = loadStatusLog();
+            const splitCandidate = [...pendingFiles]
+              .filter(f => f.totalMB > 0
+                && !splitLog[`${f.name}_isSplitIntermediate`]  // don't re-split Part A
+                && !splitLog[`${f.name}_isSplitFinal`])        // don't re-split Part B
+              .sort((a, b) => a.totalMB - b.totalMB)[0]; // smallest file = least overshoot
+            if (splitCandidate) {
+              try {
+                splitFileToFitBalance(splitCandidate, availableMB);
+                console.log(`✂️  Split triggered on "${splitCandidate.name}" — restarting scan to process Part A...`);
+                continue; // re-scan: Part A is now a valid pending file
+              } catch (splitErr) {
+                console.warn(`⚠️  File split failed for "${splitCandidate.name}": ${splitErr.message}`);
+                sendAlert('⚠️ MTN GroupShare — Split Failed', `Could not split "${splitCandidate.name}": ${splitErr.message}`);
+              }
+            }
+          }
         } else {
           if (!await isSessionActive(page)) {
             console.log('🔒 Session lost before upload — re-logging in...');

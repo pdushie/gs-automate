@@ -779,14 +779,16 @@
     <div class="panel">
       <div class="panel-hdr">
         <span class="panel-title">Files</span>
-        <div class="tabs">
-          <button class="tab active" data-f="ALL"       onclick="setTab(this)">All</button>
-          <button class="tab"        data-f="PENDING"   onclick="setTab(this)">Pending</button>
-          <button class="tab"        data-f="ACTIVE"    onclick="setTab(this)">Active</button>
-          <button class="tab"        data-f="DONE"      onclick="setTab(this)">Done</button>
-          <button class="tab"        data-f="FAILED"    onclick="setTab(this)">Failed</button>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <button id="splitToggleBtn" onclick="toggleSplitEnabled()" style="font-size:0.78rem;padding:5px 12px;display:none" class="btn" title="When enabled, the bot will split a pending file into two parts to drain the balance when no single file fits. Enable only when no new files are being sent."></button>
+          <div class="tabs">
+            <button class="tab active" data-f="ALL"       onclick="setTab(this)">All</button>
+            <button class="tab"        data-f="PENDING"   onclick="setTab(this)">Pending</button>
+            <button class="tab"        data-f="ACTIVE"    onclick="setTab(this)">Active</button>
+            <button class="tab"        data-f="DONE"      onclick="setTab(this)">Done</button>
+            <button class="tab"        data-f="FAILED"    onclick="setTab(this)">Failed</button>
+          </div>
         </div>
-      </div>
       <div class="tbl-wrap">
         <table>
           <thead>
@@ -1854,9 +1856,44 @@ async function sendRetryCallback() {
   btn.textContent = 'Send Callback';
 }
 
+/* ── Balance-drain split toggle ─────────────────────────── */
+async function loadSplitToggle() {
+  try {
+    const r = await fetch('/settings/split-enabled');
+    if (!r.ok) return;
+    const d = await r.json();
+    const btn = document.getElementById('splitToggleBtn');
+    if (!btn) return;
+    btn.style.display = 'inline-block';
+    btn.dataset.enabled = d.enabled ? 'true' : 'false';
+    btn.textContent     = d.enabled ? '✂️ Split: ON' : '✂️ Split: OFF';
+    btn.style.background = d.enabled ? '#ef4444' : 'var(--muted)';
+    btn.style.color      = '#fff';
+    btn.style.border     = 'none';
+    btn.title = d.enabled
+      ? 'Balance-drain file split is ENABLED — bot will split files to drain balance. Click to disable.'
+      : 'Balance-drain file split is OFF — enable only when no new files are being sent.';
+  } catch {}
+}
+
+async function toggleSplitEnabled() {
+  const btn = document.getElementById('splitToggleBtn');
+  const currentlyEnabled = btn.dataset.enabled === 'true';
+  btn.disabled = true;
+  try {
+    const r = await fetch('/settings/split-enabled', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !currentlyEnabled }),
+    });
+    if (r.ok) await loadSplitToggle();
+  } catch {}
+  btn.disabled = false;
+}
+
 /* ── Boot ────────────────────────────────── */
 setProgressBar(1); // start bar full; countdown will drain it
-doRefresh().then(startCountdown);
+doRefresh().then(() => { startCountdown(); loadSplitToggle(); });
 setInterval(checkSession, 5 * 60 * 1000);
 </script>
 </body>

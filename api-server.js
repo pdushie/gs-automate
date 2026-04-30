@@ -312,6 +312,14 @@ function cleanupOldFiles() {
           delete freshLog[filename + '_timedOutAt'];
           delete freshLog[filename + '_retryCount'];
           delete freshLog[filename + '_failedAt'];
+          // Split-part specific keys
+          delete freshLog[filename + '_isSplitIntermediate'];
+          delete freshLog[filename + '_isSplitFinal'];
+          delete freshLog[filename + '_originalFile'];
+          delete freshLog[filename + '_partnerPart'];
+          delete freshLog[filename + '_orderIds'];
+          delete freshLog[filename + '_orderId'];
+          delete freshLog[filename + '_abandonedReason'];
         }
         saveStatusLog(freshLog);
       });
@@ -319,6 +327,34 @@ function cleanupOldFiles() {
     } else {
       console.log(`🧹 Cleanup ran — nothing to delete, skipped (pending): ${skipped}`);
     }
+
+    // Prune 'SPLIT' status log entries whose original files no longer exist on disk.
+    // Original files are deleted at split time, so cleanupOldFiles never sees them
+    // in the directory listing above — without this they accumulate indefinitely.
+    withFileLock(STATUS_LOG, () => {
+      const freshLog = loadStatusLog();
+      let splitsPruned = 0;
+      for (const [key, val] of Object.entries(freshLog)) {
+        if (typeof val !== 'string' || val !== 'SPLIT') continue;
+        const onDisk = path.join(folderPath, key);
+        if (!fs.existsSync(onDisk)) {
+          delete freshLog[key];
+          delete freshLog[key + '_splitAt'];
+          delete freshLog[key + '_splitPartA'];
+          delete freshLog[key + '_splitPartB'];
+          delete freshLog[key + '_queuedAt'];
+          delete freshLog[key + '_totalMB'];
+          delete freshLog[key + '_totalMB_mtime'];
+          delete freshLog[key + '_orderIds'];
+          delete freshLog[key + '_orderId'];
+          splitsPruned++;
+        }
+      }
+      if (splitsPruned > 0) {
+        saveStatusLog(freshLog);
+        console.log(`🧹 Pruned ${splitsPruned} stale SPLIT log entry/entries`);
+      }
+    });
 
     return { deleted, skipped, deletedFiles };
   } catch (err) {
@@ -1818,6 +1854,32 @@ app.post('/evd/auto-toggle', (req, res) => {
   if (typeof enabled !== 'boolean') return res.status(400).json({ success: false, error: 'enabled must be boolean' });
   updateStatusLog({ _evdAutoEnabled: enabled });
   console.log(`🤖 EVD auto-loader ${enabled ? 'enabled' : 'disabled'} via dashboard`);
+  return res.json({ success: true, enabled });
+});
+
+// GET /settings/split-enabled — returns current state of the balance-drain file-split feature.
+app.get('/settings/split-enabled', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const enabled = loadStatusLog()._splitEnabled === true;
+  return res.json({ success: true, enabled });
+});
+
+// POST /settings/split-enabled — enable or disable the balance-drain file-split feature.
+// When enabled, the bot will automatically split a pending file into two parts
+// (Part A fits the current balance, Part B holds the remaining rows) when no file
+// fits the available balance and balance is above the 90 GB auto-purchase threshold.
+// Disabled by default — only enable when upstream is intentionally quiet.
+// Body: { enabled: true|false }
+app.post('/settings/split-enabled', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const { enabled } = req.body;
+  if (typeof enabled !== 'boolean') return res.status(400).json({ success: false, error: 'enabled must be boolean' });
+  // When enabling, also set _balanceRefreshRequested so the bot's interruptibleSleep
+  // wakes within 5 seconds and processes the split immediately — no 25-second wait.
+  const updates = { _splitEnabled: enabled };
+  if (enabled) updates._balanceRefreshRequested = true;
+  updateStatusLog(updates);
+  console.log(`✂️  Balance-drain file split ${enabled ? 'enabled' : 'disabled'} via dashboard`);
   return res.json({ success: true, enabled });
 });
 
