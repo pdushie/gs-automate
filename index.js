@@ -186,23 +186,37 @@ async function sendCallback(filename, status, completedAt, orderOverride = null)
   const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
   const body = JSON.stringify(payload);
 
+  const MAX_ATTEMPTS   = 5;
+  const RETRY_DELAYS   = [10_000, 30_000, 60_000, 120_000]; // ms between attempts
+
   console.log(`📡 Sending callback for "${filename}" (${status}) to ${orderSystemUrl}...`);
 
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
-    if (res.ok) {
-      console.log(`📤 Callback sent for "${filename}" (${status}) — HTTP ${res.status}`);
-    } else {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      if (res.ok) {
+        console.log(`📤 Callback sent for "${filename}" (${status}) — HTTP ${res.status}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
+        return; // success
+      }
       const text = await res.text().catch(() => '');
-      console.warn(`⚠️  Callback for "${filename}" returned HTTP ${res.status}: ${text}`);
+      console.warn(`⚠️  Callback for "${filename}" returned HTTP ${res.status}: ${text} (attempt ${attempt}/${MAX_ATTEMPTS})`);
+    } catch (err) {
+      console.error(`❌ Callback failed for "${filename}" (attempt ${attempt}/${MAX_ATTEMPTS}): ${err.message}`);
     }
-  } catch (err) {
-    console.error(`❌ Callback failed for "${filename}": ${err.message}`);
+
+    if (attempt < MAX_ATTEMPTS) {
+      const delay = RETRY_DELAYS[attempt - 1];
+      console.log(`🔁 Retrying callback for "${filename}" in ${delay / 1000}s...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
+
+  console.error(`🚫 Callback for "${filename}" (${status}) failed after ${MAX_ATTEMPTS} attempts — giving up`);
+  sendAlert('🚫 MTN GroupShare — Callback Failed', `Callback for "${filename}" (${status}) could not be delivered after ${MAX_ATTEMPTS} attempts. Manual resolution may be required.`);
 }
 
 

@@ -890,47 +890,39 @@ app.get('/balance', async (req, res) => {
 
   // Queue-full guard — only applied to external (unauthenticated) callers.
   // Returns a normal-shaped response with balanceMB:0 so the sender naturally
-  // backs off without needing any code changes on their end.
-  // Exception: if ALL pending files exceed available balance (balance-blocked deadlock),
-  // advertise the real balance so a smaller file can come in and drain the balance.
+  // backs off.  Rules:
+  //   • Split ENABLED  → block all new files until the entire queue is empty
+  //     (split handles draining; no outside help needed).
+  //   • Split DISABLED → block unless balance is above the auto-purchase threshold
+  //     (i.e. balance still needs draining).  Advertising the real balance lets the
+  //     sender submit a smaller file that can drain the remaining balance.
   if (!isDashboard) {
     const pending  = getPendingFileCount();
     const maxDepth = getQueueMaxDepth();
-    if (pending >= maxDepth * 3) {
-      const log           = loadStatusLog();
-      const availableMB   = log._lastBalanceMB || 0;
-      // Check if every pending file is too large to process with current balance.
-      // If so, lift the throttle so a smaller file can unblock the queue.
-      const uploadedLog   = loadUploadedLog();
-      const folderPath    = process.env.EXCEL_FOLDER_PATH;
-      let balanceBlocked  = false;
-      if (availableMB > 0 && folderPath && fs.existsSync(folderPath)) {
-        const DONE_STATES   = new Set(['DONE', 'ABANDONED', 'FAILED']);
-        const PENDING_STATES = new Set(['PENDING', 'TIMEOUT', 'IN_PROGRESS', 'PROCESSING']);
-        const pendingFiles  = fs.readdirSync(folderPath)
-          .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
-          .filter(f => !uploadedLog.includes(f) && !DONE_STATES.has(log[f]) && PENDING_STATES.has(resolveFileStatus(f, uploadedLog, log).status));
-        if (pendingFiles.length > 0) {
-          const allExceed = pendingFiles.every(f => {
-            const fileMB = log[`${f}_totalMB`] ?? 0;
-            return fileMB > availableMB;
-          });
-          if (allExceed) balanceBlocked = true;
-        }
-      }
+    if (pending >= maxDepth) {
+      const log                   = loadStatusLog();
+      const availableMB           = log._lastBalanceMB || 0;
+      const splitEnabled          = log._splitEnabled === true;
+      const AUTO_PURCHASE_MB      = 90 * 1024; // 90 GB
+      const balanceNeedsDraining  = availableMB > AUTO_PURCHASE_MB;
 
-      if (!balanceBlocked) {
+      // Allow files in only when split is OFF and balance still needs draining.
+      const allowFilesIn = !splitEnabled && balanceNeedsDraining;
+
+      if (!allowFilesIn) {
         return res.json({
           success:   true,
           balance:   '0 GB',
           balanceMB: 0,
+          queueFull: true,
           checkedAt: log._lastBalanceCheckedAt || null,
           cacheAge:  null,
           fresh:     false,
         });
       }
-      // balanceBlocked=true — fall through and return real balance so a smaller file can come in
-      console.log(`🔓 Queue depth limit reached but all pending files exceed balance (${(availableMB/1024).toFixed(2)} GB) — advertising real balance to unblock`);
+      // allowFilesIn=true — fall through and return real balance so a smaller
+      // file can come in and drain the balance.
+      console.log(`🔓 Queue full but split disabled and balance needs draining (${(availableMB / 1024).toFixed(2)} GB) — advertising real balance`);
     }
   }
 
