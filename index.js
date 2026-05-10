@@ -630,27 +630,41 @@ async function checkBalance(page, context) {
   }
 
   // ── Fallback: DOM scrape ──
+  // Wrapped in try/catch — if the portal is temporarily unreachable (ERR_EMPTY_RESPONSE etc.)
+  // we return the last cached balance instead of propagating a fatal crash.
   console.log('\n💰 Checking data balance (DOM)...');
-  await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
-  await reloadWithRetry(page, { waitUntil: 'networkidle' });
-  await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
-  await page.waitForTimeout(2000);
+  try {
+    await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
+    await reloadWithRetry(page, { waitUntil: 'networkidle' });
+    await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
+    await page.waitForTimeout(2000);
 
-  const balanceText = await page.$eval(
-    'h3[data-bind*="DataVolume"]',
-    el => el.innerText.trim()
-  );
+    const balanceText = await page.$eval(
+      'h3[data-bind*="DataVolume"]',
+      el => el.innerText.trim()
+    );
 
-  const totalMB = parseBalanceToMB(balanceText);
-  console.log(`💰 Balance: ${balanceText} (${totalMB.toFixed(2)} MB)`);
+    const totalMB = parseBalanceToMB(balanceText);
+    console.log(`💰 Balance: ${balanceText} (${totalMB.toFixed(2)} MB)`);
 
-  updateStatusLog({
-    _lastBalance: balanceText,
-    _lastBalanceMB: totalMB,
-    _lastBalanceCheckedAt: new Date().toISOString(),
-  });
+    updateStatusLog({
+      _lastBalance: balanceText,
+      _lastBalanceMB: totalMB,
+      _lastBalanceCheckedAt: new Date().toISOString(),
+    });
 
-  return { balanceText, totalMB };
+    return { balanceText, totalMB };
+  } catch (domErr) {
+    // Both API and DOM paths failed — portal is temporarily unreachable.
+    // Return cached balance so the main loop can continue without crashing.
+    const cached = loadStatusLog();
+    const totalMB = cached._lastBalanceMB || 0;
+    const balanceText = cached._lastBalance || 'Unknown';
+    console.warn(`⚠️  DOM balance scrape failed: ${domErr.message}`);
+    console.warn(`⚠️  Returning cached balance: ${balanceText} (${totalMB.toFixed(2)} MB)`);
+    sendAlert('⚠️ MTN GroupShare — Balance Check Failed', `Both API and DOM balance checks failed. Using cached value: ${balanceText}. Portal may be temporarily unreachable.`);
+    return { balanceText, totalMB };
+  }
 }
 
 function _parseExcelTotalMB(filePath) {
@@ -1764,9 +1778,13 @@ async function run() {
           !cycleLog[`${f.name}_isSplitIntermediate`] && !cycleLog[`${f.name}_isSplitFinal`]
         );
 
-        // If a split part is waiting, upload it standalone — skip bin-pack this cycle
+        // If a split part is waiting, upload it standalone — skip bin-pack this cycle.
+        // Always pick Part A (isSplitIntermediate) before Part B (isSplitFinal) — the
+        // largest-first sort would otherwise surface Part B first since it holds more rows.
         const filesToPack = splitParts.length > 0 ? [] : regularFiles;
-        const forceSingleFile = splitParts.length > 0 ? splitParts[0] : null;
+        const forceSingleFile = splitParts.length > 0
+          ? (splitParts.find(f => cycleLog[`${f.name}_isSplitIntermediate`]) || splitParts[0])
+          : null;
 
         // ── Optimal bin-pack: maximise balance consumption ────────────────────
         // findOptimalBatch picks the combination of files that uses as much of
