@@ -1045,20 +1045,20 @@ async function uploadFile(page, excelFile) {
 
   try {
     await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
-    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 60000 });
+    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 240000 });
     await page.click('button.k-upload-selected');
     console.log('✅ Upload clicked');
 
     await beneficiariesNavPromise;
     console.log('✅ Beneficiaries page loaded');
 
-    await page.waitForSelector('#uploadList', { timeout: 10000 });
+    await page.waitForSelector('#uploadList', { timeout: 240000 });
     await page.click('#uploadList');
     console.log('✅ Share clicked');
 
-    await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 10000 });
+    await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 240000 });
     await page.waitForTimeout(500);
-    const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 30000 });
+    const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 240000 });
     await page.click('.uk-button-primary:has-text("Ok")');
     console.log('✅ Confirmation accepted');
 
