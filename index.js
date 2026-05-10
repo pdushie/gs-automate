@@ -364,7 +364,7 @@ async function login(page) {
     // ── Phase 1: Submit credentials ONCE to get to the OTP page ──────────
     await page.goto('https://up2u.mtn.com.gh/account/login', {
       waitUntil: 'domcontentloaded',
-      timeout: 60000
+      timeout: 240000
     });
 
     await page.screenshot({ path: 'login-debug.png', fullPage: true });
@@ -410,7 +410,7 @@ async function login(page) {
           console.log('↩️  Navigating back to OTP page (no refresh)...');
           await page.goto('https://up2u.mtn.com.gh/account/verify-otp', {
             waitUntil: 'domcontentloaded',
-            timeout: 30000
+            timeout: 240000
           });
         }
 
@@ -418,7 +418,7 @@ async function login(page) {
 
         const navigationPromise = page.waitForURL(
           url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
-          { timeout: 60000, waitUntil: 'networkidle' }
+          { timeout: 240000, waitUntil: 'networkidle' }
         );
         await page.dispatchEvent('#login-btn', 'click');
         await navigationPromise;
