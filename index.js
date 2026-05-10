@@ -262,14 +262,21 @@ function getPendingFiles(folderPath) {
   const uploaded = loadUploadedLog();
   const statusLog = loadStatusLog();
 
-  // Collect source files currently locked inside a batch that is active or
-  // timed-out. Active batches (IN_PROGRESS / PROCESSING) were already submitted
-  // to MTN — re-queuing risks double allocation. TIMEOUT batches require manual
-  // resolution via the dashboard before source files are released.
+  // Collect source files locked inside any batch record that is still actively
+  // being processed or has successfully completed.
+  //   IN_PROGRESS / PROCESSING : file was submitted to MTN — re-queuing now risks
+  //     double-allocation; keep locked until the polling window expires.
+  //   DONE : source files should already be in the uploaded log, but if
+  //     markAsUploaded was interrupted (crash mid-loop) a source file may still be
+  //     on disk — treat as locked so it is never re-queued as PENDING.
+  //   TIMEOUT / FAILED / ABANDONED : file either timed out or failed; the aging
+  //     mechanism (PROCESSING → TIMEOUT in startup/idle loop) is designed to
+  //     re-queue source files for retry — do NOT lock TIMEOUT here or that
+  //     mechanism silently deadlocks instead.
   const lockedSourceFiles = new Set();
   for (const val of Object.values(statusLog)) {
     if (typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
-    if (val.status === 'IN_PROGRESS' || val.status === 'PROCESSING' || val.status === 'TIMEOUT') {
+    if (['IN_PROGRESS', 'PROCESSING', 'DONE'].includes(val.status)) {
       for (const sf of val.sourceFiles) lockedSourceFiles.add(sf.filename);
     }
   }
@@ -1075,9 +1082,23 @@ async function uploadFile(page, excelFile) {
             l[excelFile.name] = rec;
             atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
           });
-          const srcFiles = (loadStatusLog()[excelFile.name]?.sourceFiles || []);
-          for (const src of srcFiles) {
-            await sendCallback(src.filename, 'DONE', completedAt, src);
+          const dupSrcFiles = (loadStatusLog()[excelFile.name]?.sourceFiles || []);
+          for (let si = 0; si < dupSrcFiles.length; si++) {
+            const src = dupSrcFiles[si];
+            if (src.callbackSentAt) {
+              console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping (duplicate group path)`);
+            } else {
+              await sendCallback(src.filename, 'DONE', completedAt, src);
+              withFileLock(STATUS_LOG, () => {
+                const l = loadStatusLog();
+                const rec = l[excelFile.name] || {};
+                if (rec.sourceFiles && rec.sourceFiles[si]) {
+                  rec.sourceFiles[si].callbackSentAt = new Date().toISOString();
+                }
+                l[excelFile.name] = rec;
+                atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+              });
+            }
             updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
             markAsUploaded(src.filename);
           }
@@ -1190,7 +1211,7 @@ async function uploadFile(page, excelFile) {
             atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
           });
           try { fs.unlinkSync(excelFile.fullPath); } catch {}
-          sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
+          sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-queued for retry.`);
         } else {
           updateStatusLog({
             [excelFile.name]: 'TIMEOUT',
@@ -1220,31 +1241,44 @@ async function uploadFile(page, excelFile) {
     updateStatusLog({ [excelFile.name]: 'PROCESSING' });
   }
 
-  const maxAttempts = 70;
+  const maxAttempts = 180;
   const pollInterval = 15000;
   let isDone = false;
   let isFailed = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await reloadWithRetry(page, { waitUntil: 'networkidle' });
+    let status = null;
+    try {
+      await reloadWithRetry(page, { waitUntil: 'networkidle' });
 
-    if (page.url().includes('/account/login')) {
-      console.warn('🔒 Session expired during polling — re-logging in...');
-      sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired during upload polling. Re-logging in...');
-      await login(page);
-      await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle' });
-    }
-
-    const status = await page.evaluate((name) => {
-      const rows = document.querySelectorAll('tr.k-master-row');
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells[1] && cells[1].textContent.trim() === name) {
-          return cells[4] ? cells[4].textContent.trim() : null;
-        }
+      if (page.url().includes('/account/login')) {
+        console.warn('🔒 Session expired during polling — re-logging in...');
+        sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired during upload polling. Re-logging in...');
+        await login(page);
+        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle' });
       }
-      return null;
-    }, fileName);
+
+      status = await page.evaluate((name) => {
+        const rows = document.querySelectorAll('tr.k-master-row');
+        for (const row of rows) {
+          const cells = row.querySelectorAll('td');
+          if (cells[1] && cells[1].textContent.trim() === name) {
+            return cells[4] ? cells[4].textContent.trim() : null;
+          }
+        }
+        return null;
+      }, fileName);
+    } catch (pollErr) {
+      // Transient network/page error during a poll attempt — log and continue.
+      // The post-loop TIMEOUT path will handle it if all attempts are exhausted.
+      console.warn(`⚠️  Poll attempt ${attempt}/${maxAttempts} error for "${fileName}": ${pollErr.message}`);
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, pollInterval));
+        continue;
+      }
+      // Last attempt failed with an error — fall through to post-loop TIMEOUT
+      break;
+    }
 
     console.log(`🔄 [${new Date().toLocaleTimeString()}] Attempt ${attempt}/${maxAttempts} — ${fileName}: ${status ?? 'not found'}`);
 
@@ -1472,7 +1506,7 @@ async function run() {
   // PROCESSING (≤ 40 min) : leave as-is; getPendingFiles() holds source files
   //   locked; idle loop will age it out once the window passes.
   {
-    const BATCH_PROCESSING_TIMEOUT_MS = 40 * 60 * 1000; // 40 min
+    const BATCH_PROCESSING_TIMEOUT_MS = 50 * 60 * 1000; // 50 min
     const startupLog = loadStatusLog();
     const startupUpdates = {};
     for (const [key, val] of Object.entries(startupLog)) {
@@ -1492,6 +1526,29 @@ async function run() {
       }
     }
     if (Object.keys(startupUpdates).length) updateStatusLog(startupUpdates);
+  }
+
+  // ── Startup recovery: incomplete DONE batch source-file marking ──────────
+  // If the bot was killed while iterating through a DONE batch's source files
+  // (calling markAsUploaded per file), some files may still be on disk and not
+  // in the uploaded log.  Scan all DONE batch records and ensure every source
+  // file is marked uploaded so they are never re-queued as PENDING.
+  {
+    const doneLog = loadStatusLog();
+    const completionUpdates = {};
+    for (const [key, val] of Object.entries(doneLog)) {
+      if (typeof val !== 'object' || !val.sourceFiles || val.status !== 'DONE') continue;
+      for (const src of val.sourceFiles) {
+        if (!src.filename) continue;
+        const alreadyUploaded = loadUploadedLog().includes(src.filename);
+        if (!alreadyUploaded) {
+          markAsUploaded(src.filename);
+          completionUpdates[`${src.filename}_completedAt`] = val.completedAt || doneLog[`${src.filename}_completedAt`] || new Date().toISOString();
+          console.warn(`⚠️  Startup: source file "${src.filename}" from DONE batch "${key}" was not in uploaded log — marked uploaded now`);
+        }
+      }
+    }
+    if (Object.keys(completionUpdates).length) updateStatusLog(completionUpdates);
   }
 
   const browser = await chromium.launch({
@@ -1606,7 +1663,7 @@ async function run() {
         // This handles restarts where the batch was fresh (< 40 min) and couldn't
         // be aged out at startup — once the window passes the source files unlock.
         {
-          const BATCH_PROCESSING_TIMEOUT_MS = 40 * 60 * 1000;
+          const BATCH_PROCESSING_TIMEOUT_MS = 50 * 60 * 1000;
           const idleStatusLog = loadStatusLog();
           const idleUpdates = {};
           for (const [key, val] of Object.entries(idleStatusLog)) {
@@ -1694,11 +1751,28 @@ async function run() {
       }
 
       if (!autoPurchaseTriggered) {
+        // ── Separate split parts from normal files ────────────────────────────
+        // Split intermediates (Part A) and split finals (Part B/B-A/etc.) must
+        // NEVER be merged with other files.  They were sized to fit the balance
+        // at split-time and carry their own callback logic.  Process the oldest
+        // split part solo first; only bin-pack regular files when none exist.
+        const cycleLog   = loadStatusLog();
+        const splitParts = pendingFiles.filter(f =>
+          cycleLog[`${f.name}_isSplitIntermediate`] || cycleLog[`${f.name}_isSplitFinal`]
+        );
+        const regularFiles = pendingFiles.filter(f =>
+          !cycleLog[`${f.name}_isSplitIntermediate`] && !cycleLog[`${f.name}_isSplitFinal`]
+        );
+
+        // If a split part is waiting, upload it standalone — skip bin-pack this cycle
+        const filesToPack = splitParts.length > 0 ? [] : regularFiles;
+        const forceSingleFile = splitParts.length > 0 ? splitParts[0] : null;
+
         // ── Optimal bin-pack: maximise balance consumption ────────────────────
         // findOptimalBatch picks the combination of files that uses as much of
         // availableMB as possible so the post-upload leftover is < 90 GB and
         // auto-purchase triggers automatically.
-        const batch = findOptimalBatch(pendingFiles, availableMB);
+        const batch = forceSingleFile ? [forceSingleFile] : findOptimalBatch(filesToPack, availableMB);
         const batchMB = batch.reduce((s, f) => s + f.totalMB, 0);
         skippedDueToBalance = pendingFiles.filter(f => !batch.includes(f)).length;
 
@@ -1752,8 +1826,18 @@ async function run() {
 
           // ── Build merged file (or use single file directly if only one fits) ─
           let fileToUpload;
-          if (batch.length === 1) {
-            fileToUpload = batch[0];
+          const mergeLog = loadStatusLog();
+          const batchHasSplitPart = batch.some(f =>
+            mergeLog[`${f.name}_isSplitIntermediate`] || mergeLog[`${f.name}_isSplitFinal`]
+          );
+          if (batch.length === 1 || batchHasSplitPart) {
+            // Always upload split parts standalone — never merge them
+            if (batchHasSplitPart && batch.length > 1) {
+              console.warn(`⚠️  Split part found in multi-file batch — isolating to standalone upload to prevent double-processing`);
+            }
+            fileToUpload = batchHasSplitPart
+              ? batch.find(f => mergeLog[`${f.name}_isSplitIntermediate`] || mergeLog[`${f.name}_isSplitFinal`])
+              : batch[0];
             console.log(`\n📌 Single file batch — uploading directly: ${fileToUpload.name}`);
           } else {
             console.log(`\n📎 Merging ${batch.length} file(s) into one batch (${(batchMB / 1024).toFixed(2)} GB total):`);
@@ -1821,10 +1905,41 @@ async function run() {
     console.error('❌ Fatal error:', err.message);
     sendAlert('❌ MTN GroupShare — Fatal Error', err.message);
     try { await page.screenshot({ path: 'error-state.png' }); } catch {}
+    // Signal the outer watchdog that a fatal crash occurred
+    lastFatalCrashAt = Date.now();
   } finally {
     try { await page.waitForTimeout(5000); } catch {}
     await browser.close();
   }
 }
 
-run();
+// ── Crash watchdog ───────────────────────────────────────────────────────────
+// If run() crashes and the error has not self-resolved within 10 minutes,
+// exit the process so the host (Render) restarts the service automatically.
+let lastFatalCrashAt = null;
+const CRASH_RECOVERY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+async function runWithWatchdog() {
+  while (true) {
+    lastFatalCrashAt = null;
+    await run();
+
+    if (lastFatalCrashAt === null) {
+      // run() returned without a fatal crash (e.g. clean shutdown) — stop
+      break;
+    }
+
+    // Fatal crash occurred — wait out the remaining recovery window then restart
+    const waitMs = Math.max(0, CRASH_RECOVERY_WINDOW_MS - (Date.now() - lastFatalCrashAt));
+    if (waitMs > 0) {
+      console.log(`⏳ Fatal error detected — waiting ${Math.round(waitMs / 1000)}s before forcing restart...`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+
+    console.error('🔴 Fatal error unrecovered after 10 minutes — exiting for process restart');
+    sendAlert('🔴 MTN GroupShare — Restarting', 'Fatal error unrecovered after 10 minutes. Process exiting for automatic restart.');
+    process.exit(1);
+  }
+}
+
+runWithWatchdog();

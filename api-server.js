@@ -546,6 +546,25 @@ app.post('/upload', upload.single('file'), (req, res) => {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
 
+  // Hard queue depth enforcement — reject immediately if queue is full.
+  // This is the authoritative gate; /balance is only a soft advisory signal.
+  {
+    const pending  = getPendingFileCount();
+    const maxDepth = getQueueMaxDepth();
+    if (pending >= maxDepth) {
+      // Delete the file multer already wrote to disk before rejecting
+      try { fs.unlinkSync(req.file.path); } catch {}
+      console.warn(`🚫 /upload rejected "${req.file.originalname}" — queue full (${pending}/${maxDepth})`);
+      return res.status(429).json({
+        success: false,
+        error:   'Queue is full — please retry later',
+        queueFull: true,
+        pending,
+        maxDepth,
+      });
+    }
+  }
+
   // Warn if the cached balance suggests the file may exceed available data,
   // but skip the XLSX parse — the bot has its own cached total and the
   // synchronous XLSX.readFile blocks the event loop on large files.
@@ -582,6 +601,22 @@ app.post('/upload-base64', (req, res) => {
 
   if (!filename.endsWith('.xlsx') && !filename.endsWith('.xls')) {
     return res.status(400).json({ success: false, error: 'Only .xlsx and .xls files are allowed' });
+  }
+
+  // Hard queue depth enforcement
+  {
+    const pending  = getPendingFileCount();
+    const maxDepth = getQueueMaxDepth();
+    if (pending >= maxDepth) {
+      console.warn(`🚫 /upload-base64 rejected "${filename}" — queue full (${pending}/${maxDepth})`);
+      return res.status(429).json({
+        success: false,
+        error:   'Queue is full — please retry later',
+        queueFull: true,
+        pending,
+        maxDepth,
+      });
+    }
   }
 
   try {
@@ -687,19 +722,10 @@ function resolveFileStatus(filename, uploaded, statusLog) {
     };
   }
 
-  // 2. Flat string status key (legacy single-file uploads still in progress)
-  if (statusLog[filename] && typeof statusLog[filename] === 'string') {
-    return {
-      status: statusLog[filename],
-      completedAt: statusLog[filename + '_completedAt'] || null,
-      queuedAt: statusLog[filename + '_queuedAt'] || null,
-      orderId: statusLog[filename + '_orderId'] || null,
-      orderIds: statusLog[filename + '_orderIds'] || null,
-      mergedBatch,
-    };
-  }
-
-  // 3. File is inside an active/pending merged batch
+  // 2. File is inside a merged batch record — this takes priority over any stale flat
+  //    string status the file may carry from a previous solo attempt (e.g. TIMEOUT).
+  //    The batch record is always the most authoritative source of truth once a merge
+  //    has been recorded.
   if (mergedBatch) {
     return {
       status: mergedBatchVal.status || 'PROCESSING',
@@ -707,6 +733,18 @@ function resolveFileStatus(filename, uploaded, statusLog) {
       queuedAt: mergedBatchVal.createdAt || null,
       orderId: mergedSrcEntry.orderId || null,
       orderIds: mergedSrcEntry.orderIds || null,
+      mergedBatch,
+    };
+  }
+
+  // 3. Flat string status key (non-merged / solo upload)
+  if (statusLog[filename] && typeof statusLog[filename] === 'string') {
+    return {
+      status: statusLog[filename],
+      completedAt: statusLog[filename + '_completedAt'] || null,
+      queuedAt: statusLog[filename + '_queuedAt'] || null,
+      orderId: statusLog[filename + '_orderId'] || null,
+      orderIds: statusLog[filename + '_orderIds'] || null,
       mergedBatch,
     };
   }
