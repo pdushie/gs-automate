@@ -1069,7 +1069,7 @@ async function uploadFile(page, excelFile) {
     }
   } catch (navErr) {
     console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
-    await page.screenshot({ path: `nav-error-${fileName}.png` });
+    try { await page.screenshot({ path: `nav-error-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
 
     // Check if we're still on the upload page — indicates the portal rejected the upload
     const currentUrl = page.url();
@@ -1361,7 +1361,7 @@ async function uploadFile(page, excelFile) {
         }
       }
 
-      await page.screenshot({ path: `done-${fileName}.png` });
+      try { await page.screenshot({ path: `done-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
       console.log(`🎉 ${excelFile.name} — DONE!`);
       break;
     }
@@ -1403,7 +1403,7 @@ async function uploadFile(page, excelFile) {
           sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
         }
       }
-      await page.screenshot({ path: `failed-${fileName}.png` });
+      try { await page.screenshot({ path: `failed-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
       console.error(`❌ ${excelFile.name} — FAILED on MTN's end`);
       break;
     }
@@ -1459,7 +1459,7 @@ async function uploadFile(page, excelFile) {
         }
       }
       console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} timeout(s)`);
-      await page.screenshot({ path: `abandoned-${fileName}.png` });
+      try { await page.screenshot({ path: `abandoned-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
     } else {
       if (excelFile.isMerged) {
         withFileLock(STATUS_LOG, () => {
@@ -1483,7 +1483,7 @@ async function uploadFile(page, excelFile) {
         sendAlert('⚠️ MTN GroupShare — Processing Timeout', `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
       }
       console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — TIMEOUT, manual resolution required`);
-      await page.screenshot({ path: `timeout-${fileName}.png` });
+      try { await page.screenshot({ path: `timeout-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
     }
   }
 

@@ -772,6 +772,9 @@
     <button class="page-tab" id="ptEvd" onclick="setPageTab('evd')">
       💸 EVD Airtime <span class="num-badge" id="evdBadge">0</span>
     </button>
+    <button class="page-tab" id="ptScreenshots" onclick="setPageTab('screenshots')">
+      📸 Screenshots
+    </button>
   </div>
 
   <!-- Files tab -->
@@ -856,6 +859,19 @@
           </tbody>
         </table>
         <div id="evdPagination"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Screenshots tab -->
+  <div class="page-tab-content" id="tabScreenshots">
+    <div class="panel">
+      <div class="panel-hdr">
+        <span class="panel-title">📸 Bot Screenshots</span>
+        <button class="btn" onclick="loadScreenshots()" style="font-size:0.78rem;padding:5px 12px">🔄 Refresh</button>
+      </div>
+      <div id="screenshotsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:18px">
+        <div class="empty-cell" style="grid-column:1/-1"><span class="spin"></span> Loading…</div>
       </div>
     </div>
   </div>
@@ -1466,11 +1482,43 @@ function setPageTab(tab) {
   currentPageTab = tab;
   document.getElementById('ptFiles').classList.toggle('active', tab === 'files');
   document.getElementById('ptEvd').classList.toggle('active',   tab === 'evd');
+  document.getElementById('ptScreenshots').classList.toggle('active', tab === 'screenshots');
   document.getElementById('tabFiles').classList.toggle('active', tab === 'files');
   document.getElementById('tabEvd').classList.toggle('active',   tab === 'evd');
+  document.getElementById('tabScreenshots').classList.toggle('active', tab === 'screenshots');
   document.getElementById('fileSearchCard').style.display = tab === 'files' ? '' : 'none';
   // Load EVD data lazily on first visit
   if (tab === 'evd') { loadEvdHistory(); loadEvdAccounts(); }
+  if (tab === 'screenshots') loadScreenshots();
+}
+
+/* ── Screenshots ───────────────────────────── */
+async function loadScreenshots() {
+  const grid = document.getElementById('screenshotsGrid');
+  grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1"><span class="spin"></span> Loading…</div>';
+  try {
+    const r = await fetch('/screenshots');
+    if (!r.ok) { grid.innerHTML = `<div class="empty-cell" style="grid-column:1/-1;color:var(--red)">Failed to load screenshots</div>`; return; }
+    const { screenshots } = await r.json();
+    if (!screenshots.length) { grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1">No screenshots yet.</div>'; return; }
+    grid.innerHTML = screenshots.map(s => {
+      const age = s.mtime ? new Date(s.mtime).toLocaleString() : '';
+      const kb  = s.size ? `${(s.size/1024).toFixed(1)} KB` : '';
+      return `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column">
+        <a href="/screenshots/${encodeURIComponent(s.name)}" target="_blank" style="display:block;background:#000;line-height:0">
+          <img src="/screenshots/${encodeURIComponent(s.name)}" alt="${s.name}" loading="lazy"
+            style="width:100%;height:160px;object-fit:cover;object-position:top"
+            onerror="this.style.display='none'">
+        </a>
+        <div style="padding:8px 10px;flex:1">
+          <div style="font-size:0.72rem;color:var(--text);word-break:break-all;font-weight:600;margin-bottom:3px">${s.name}</div>
+          <div style="font-size:0.7rem;color:var(--muted)">${age} · ${kb}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    grid.innerHTML = `<div class="empty-cell" style="grid-column:1/-1;color:var(--red)">${err.message}</div>`;
+  }
 }
 
 /* ── EVD Airtime ───────────────────────────── */

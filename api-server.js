@@ -1069,6 +1069,32 @@ app.get('/disk', (req, res) => {
 });
 
 
+// GET /screenshots — list all bot-generated screenshots (nav-error, done, failed, etc.)
+// GET /screenshots/:name — serve a specific screenshot image
+app.get('/screenshots', requireAuth, (req, res) => {
+  try {
+    const dir = process.cwd();
+    const files = fs.readdirSync(dir)
+      .filter(f => f.endsWith('.png'))
+      .map(f => {
+        const stat = fs.statSync(path.join(dir, f));
+        return { name: f, size: stat.size, mtime: stat.mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime); // newest first
+    res.json({ success: true, screenshots: files });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/screenshots/:name', requireAuth, (req, res) => {
+  const name = path.basename(req.params.name); // prevent path traversal
+  if (!name.endsWith('.png')) return res.status(400).json({ success: false, error: 'Only .png allowed' });
+  const filePath = path.join(process.cwd(), name);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, error: 'Not found' });
+  res.sendFile(filePath);
+});
+
 // POST /cleanup — manually trigger file cleanup
 app.post('/cleanup', (req, res) => {
   console.log('🧹 Manual cleanup triggered via API');
