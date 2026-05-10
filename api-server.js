@@ -932,8 +932,10 @@ app.get('/balance', async (req, res) => {
   //   • Split ENABLED  → block all new files until the entire queue is empty
   //     (split handles draining; no outside help needed).
   //   • Split DISABLED → block unless balance is above the auto-purchase threshold
-  //     (i.e. balance still needs draining).  Advertising the real balance lets the
-  //     sender submit a smaller file that can drain the remaining balance.
+  //     AND there is no file currently being actively processed (IN_PROGRESS /
+  //     PROCESSING).  Advertising the real balance when the bot is mid-upload or
+  //     mid-poll would cause the sender to submit a new file that immediately gets
+  //     429'd — only invite a new file in when the slot will actually be free soon.
   if (!isDashboard) {
     const pending  = getPendingFileCount();
     const maxDepth = getQueueMaxDepth();
@@ -944,8 +946,17 @@ app.get('/balance', async (req, res) => {
       const AUTO_PURCHASE_MB      = 90 * 1024; // 90 GB
       const balanceNeedsDraining  = availableMB > AUTO_PURCHASE_MB;
 
-      // Allow files in only when split is OFF and balance still needs draining.
-      const allowFilesIn = !splitEnabled && balanceNeedsDraining;
+      // Check whether the bot is actively uploading or polling right now
+      const isActivelyProcessing = Object.values(log).some(val =>
+        typeof val === 'object' && val !== null && val.status &&
+        ['IN_PROGRESS', 'PROCESSING'].includes(val.status)
+      ) || Object.entries(log).some(([k, v]) =>
+        typeof v === 'string' && ['IN_PROGRESS', 'PROCESSING'].includes(v) && !k.startsWith('_')
+      );
+
+      // Allow files in only when split is OFF, balance still needs draining,
+      // AND the bot is not currently mid-upload/mid-poll on another file.
+      const allowFilesIn = !splitEnabled && balanceNeedsDraining && !isActivelyProcessing;
 
       if (!allowFilesIn) {
         return res.json({
@@ -960,7 +971,7 @@ app.get('/balance', async (req, res) => {
       }
       // allowFilesIn=true — fall through and return real balance so a smaller
       // file can come in and drain the balance.
-      console.log(`🔓 Queue full but split disabled and balance needs draining (${(availableMB / 1024).toFixed(2)} GB) — advertising real balance`);
+      console.log(`🔓 Queue full but split disabled, balance needs draining (${(availableMB / 1024).toFixed(2)} GB), and bot is idle — advertising real balance`);
     }
   }
 
@@ -1093,6 +1104,20 @@ app.get('/screenshots/:name', requireAuth, (req, res) => {
   const filePath = path.join(process.cwd(), name);
   if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, error: 'Not found' });
   res.sendFile(filePath);
+});
+
+app.delete('/screenshots/:name', requireAuth, (req, res) => {
+  const name = path.basename(req.params.name); // prevent path traversal
+  if (!name.endsWith('.png')) return res.status(400).json({ success: false, error: 'Only .png allowed' });
+  const filePath = path.join(process.cwd(), name);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, error: 'Not found' });
+  try {
+    fs.unlinkSync(filePath);
+    console.log(`🗑️  Screenshot deleted: ${name}`);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // POST /cleanup — manually trigger file cleanup
