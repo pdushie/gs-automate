@@ -362,7 +362,9 @@ async function login(page) {
 
   try {
     // ── Phase 1: Submit credentials ONCE to get to the OTP page ──────────
-    await page.goto('https://up2u.mtn.com.gh/account/login', {
+    // Use gotoWithRetry so transient ERR_EMPTY_RESPONSE / portal blips don't
+    // abort login immediately — they are retried a few times before giving up.
+    await gotoWithRetry(page, 'https://up2u.mtn.com.gh/account/login', {
       waitUntil: 'domcontentloaded',
       timeout: 240000
     });
@@ -408,7 +410,7 @@ async function login(page) {
         // page WITHOUT refreshing (a refresh would trigger a new OTP request)
         if (!page.url().includes('/account/verify-otp')) {
           console.log('↩️  Navigating back to OTP page (no refresh)...');
-          await page.goto('https://up2u.mtn.com.gh/account/verify-otp', {
+          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/account/verify-otp', {
             waitUntil: 'domcontentloaded',
             timeout: 240000
           });
@@ -575,8 +577,28 @@ async function purchaseData(page, context) {
   console.log(`💰 Balance after purchase: ${newBalanceText} (${newBalanceMB.toFixed(2)} MB)`);
 
   console.log('🎉 Data purchase complete!');
-  sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText}`);
-  updateStatusLog({ _purchaseStatus: 'DONE', _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`, _purchaseCompletedAt: new Date().toISOString() });
+
+  // ── Daily batch count ─────────────────────────────────────────────────────
+  // Tracks how many 1.5 TB bundles have been purchased today (UTC date).
+  // Resets automatically when the date changes.
+  const todayUTC = new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const batchCountLog = loadStatusLog();
+  const prevDate    = batchCountLog._batchCountDate  || '';
+  const prevCount   = batchCountLog._batchCountToday || 0;
+  const prevTotal   = batchCountLog._batchCountTotal || 0;
+  const newCount    = prevDate === todayUTC ? prevCount + 1 : 1;
+  const newTotal    = prevTotal + 1;
+  console.log(`📦 Daily batch count: ${newCount} purchase(s) on ${todayUTC} (${newTotal} all-time)`);
+
+  sendAlert('🎉 MTN GroupShare — Data Purchased', `Successfully purchased 1.5 TB (1 TB, 512 GB) data bundle for GH¢ 4,812.96. New balance: ${newBalanceText} | Batch count today: ${newCount} · All-time: ${newTotal}`);
+  updateStatusLog({
+    _purchaseStatus: 'DONE',
+    _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`,
+    _purchaseCompletedAt: new Date().toISOString(),
+    _batchCountDate: todayUTC,
+    _batchCountToday: newCount,
+    _batchCountTotal: newTotal,
+  });
   return true;
 }
 
@@ -1605,7 +1627,28 @@ async function run() {
   });
 
   try {
-    await login(page);
+    // Retry initial login indefinitely when the portal is unreachable (service down).
+    // Uses increasing backoff: 1 → 2 → 4 → 8 → 16 → 30 min (capped), then holds at 30 min.
+    // Non-transient errors (bad credentials, OTP timeout, etc.) are still fatal.
+    let _serviceDownAttempt = 0;
+    while (true) {
+      try {
+        await login(page);
+        break; // success — proceed to main loop
+      } catch (loginErr) {
+        if (TRANSIENT_NAV_ERR.test(loginErr.message)) {
+          _serviceDownAttempt++;
+          const backoffMins = Math.min(30, Math.pow(2, _serviceDownAttempt - 1));
+          console.warn(`⚠️  Initial login failed (attempt ${_serviceDownAttempt}) — portal appears to be down: ${loginErr.message}`);
+          console.log(`⏳ Retrying in ${backoffMins} minute(s)...`);
+          sendAlert('⚠️ MTN GroupShare — Portal Down?', `Service unreachable (attempt ${_serviceDownAttempt}). Retrying in ${backoffMins} min.`);
+          await new Promise(r => setTimeout(r, backoffMins * 60 * 1000));
+          // loop and retry
+        } else {
+          throw loginErr; // non-transient — let fatal handler deal with it
+        }
+      }
+    }
 
     console.log('\n🔁 Entering main loop — press Ctrl+C to stop.\n');
     let idleCount = 0;

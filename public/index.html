@@ -726,6 +726,12 @@
     </div>
 
     <div class="card">
+      <div class="card-lbl">Batch Count</div>
+      <div class="card-val" id="batchVal">—</div>
+      <div class="card-sub" id="batchSub">1.5 TB purchases today</div>
+    </div>
+
+    <div class="card">
       <div class="card-lbl">System Health</div>
       <div class="card-val" style="font-size:0.88rem;padding-top:5px">
         <span style="display:flex;align-items:center;gap:7px">
@@ -1024,14 +1030,14 @@ function summaryFingerprint(d) {
   return [
     d.balance?.mb, d.balance?.checkedAt,
     d.queue?.total, d.queue?.active, d.queue?.done, d.queue?.failed,
-    d.purchase?.status,
+    d.purchase?.status, d.batchCount?.today,
     d.files.map(f => f.filename + f.status + (f.completedAt||'') + (f.queuePosition??'')).join('|')
   ].join(':');
 }
 
 /* ── Render stats cards ──────────────────── */
 function renderStats(d) {
-  const { balance, queue, purchase, disk } = d;
+  const { balance, queue, purchase, disk, batchCount } = d;
 
   // Balance
   document.getElementById('balVal').textContent = fmtMB(balance.mb);
@@ -1069,6 +1075,13 @@ function renderStats(d) {
   } else {
     queueValEl.style.color = '';
     queueSubEl.textContent = `${fmtMB(queue.pendingMB)} pending allocation${queue.maxDepth ? ` · max ${queue.maxDepth}` : ''}`;
+  }
+
+  // Batch count
+  if (batchCount) {
+    document.getElementById('batchVal').textContent = batchCount.today;
+    document.getElementById('batchSub').textContent =
+      `1.5 TB purchases today${batchCount.allTime ? ` · ${batchCount.allTime} all‑time` : ''}`;
   }
 
   // Next in line strip

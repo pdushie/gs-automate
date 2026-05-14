@@ -1484,6 +1484,13 @@ app.get('/summary', requireAuth, (req, res) => {
       requestedAt: statusLog._purchaseRequestedAt || null,
       completedAt: statusLog._purchaseCompletedAt || null,
     },
+    batchCount: {
+      today:   statusLog._batchCountDate === new Date().toISOString().slice(0, 10)
+                 ? (statusLog._batchCountToday || 0)
+                 : 0,
+      date:    statusLog._batchCountDate  || null,
+      allTime: statusLog._batchCountTotal || 0,
+    },
     disk: {
       usedMB:      disk.totalMB,
       fileCount:   disk.fileCount,
