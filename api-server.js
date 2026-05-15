@@ -936,6 +936,8 @@ app.get('/balance', async (req, res) => {
   //     PROCESSING).  Advertising the real balance when the bot is mid-upload or
   //     mid-poll would cause the sender to submit a new file that immediately gets
   //     429'd — only invite a new file in when the slot will actually be free soon.
+  //   • Balance override set → advertise the override value regardless of actual
+  //     balance so oversized files can be accepted for splitting.
   if (!isDashboard) {
     const pending  = getPendingFileCount();
     const maxDepth = getQueueMaxDepth();
@@ -945,6 +947,7 @@ app.get('/balance', async (req, res) => {
       const splitEnabled          = log._splitEnabled === true;
       const AUTO_PURCHASE_MB      = 90 * 1024; // 90 GB
       const balanceNeedsDraining  = availableMB > AUTO_PURCHASE_MB;
+      const overrideMB            = log._balanceOverrideMB || 0;
 
       // Check whether the bot is actively uploading or polling right now
       const isActivelyProcessing = Object.values(log).some(val =>
@@ -954,9 +957,9 @@ app.get('/balance', async (req, res) => {
         typeof v === 'string' && ['IN_PROGRESS', 'PROCESSING'].includes(v) && !k.startsWith('_')
       );
 
-      // Allow files in only when split is OFF, balance still needs draining,
-      // AND the bot is not currently mid-upload/mid-poll on another file.
-      const allowFilesIn = !splitEnabled && balanceNeedsDraining && !isActivelyProcessing;
+      // Allow files in when split is OFF and balance needs draining (normal drain path),
+      // OR when a manual balance override is active.
+      const allowFilesIn = (!splitEnabled && balanceNeedsDraining && !isActivelyProcessing) || overrideMB > 0;
 
       if (!allowFilesIn) {
         return res.json({
@@ -969,8 +972,23 @@ app.get('/balance', async (req, res) => {
           fresh:     false,
         });
       }
-      // allowFilesIn=true — fall through and return real balance so a smaller
-      // file can come in and drain the balance.
+
+      // When a manual override is active, advertise the override value so the
+      // sender knows their file will fit.
+      if (overrideMB > 0) {
+        console.log(`🔓 Queue full — balance override active (${(overrideMB / 1024).toFixed(2)} GB) — advertising override balance`);
+        return res.json({
+          success:   true,
+          balance:   `${(overrideMB / 1024 / 1024).toFixed(2)} TB`,
+          balanceMB: overrideMB,
+          queueFull: false,
+          checkedAt: log._lastBalanceCheckedAt || null,
+          cacheAge:  null,
+          fresh:     false,
+        });
+      }
+
+      // Fall through — return real balance so a smaller file can drain the balance.
       console.log(`🔓 Queue full but split disabled, balance needs draining (${(availableMB / 1024).toFixed(2)} GB), and bot is idle — advertising real balance`);
     }
   }
@@ -984,6 +1002,21 @@ app.get('/balance', async (req, res) => {
       const ageMins = Math.round(ageMs / 60000);
       cacheAge = ageMins < 1 ? 'less than a minute ago' : `${ageMins} minute${ageMins === 1 ? '' : 's'} ago`;
     }
+
+    // Manual balance override: return override value to external callers when set.
+    const overrideMB = !isDashboard ? (log._balanceOverrideMB || 0) : 0;
+    if (overrideMB > 0) {
+      return res.json({
+        success:   true,
+        balance:   `${(overrideMB / 1024 / 1024).toFixed(2)} TB`,
+        balanceMB: overrideMB,
+        checkedAt: log._lastBalanceCheckedAt || null,
+        cacheAge,
+        queueFull: false,
+        fresh:     false,
+      });
+    }
+
     return res.json({
       success: true,
       balance: log._lastBalance || 'Unknown',
@@ -1491,6 +1524,10 @@ app.get('/summary', requireAuth, (req, res) => {
       date:    statusLog._batchCountDate  || null,
       allTime: statusLog._batchCountTotal || 0,
     },
+    balanceOverride: {
+      active:    (statusLog._balanceOverrideMB || 0) > 0,
+      overrideMB: statusLog._balanceOverrideMB || 0,
+    },
     disk: {
       usedMB:      disk.totalMB,
       fileCount:   disk.fileCount,
@@ -1950,6 +1987,35 @@ app.get('/settings/split-enabled', (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
   const enabled = loadStatusLog()._splitEnabled === true;
   return res.json({ success: true, enabled });
+});
+
+// GET /settings/balance-override — return current override value.
+app.get('/settings/balance-override', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const log = loadStatusLog();
+  return res.json({ success: true, overrideMB: log._balanceOverrideMB || 0 });
+});
+
+// POST /settings/balance-override — set a manual balance override (in GB).
+// External /balance callers will receive this value instead of the real balance.
+// Body: { overrideGB: number }  — use 0 or DELETE to clear.
+app.post('/settings/balance-override', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const { overrideGB } = req.body || {};
+  if (typeof overrideGB !== 'number' || overrideGB < 0)
+    return res.status(400).json({ success: false, error: 'overrideGB must be a non-negative number' });
+  const overrideMB = Math.round(overrideGB * 1024);
+  updateStatusLog({ _balanceOverrideMB: overrideMB });
+  console.log(`⚖️  Balance override ${overrideMB > 0 ? `set to ${overrideGB} GB` : 'cleared'} via dashboard`);
+  return res.json({ success: true, overrideMB });
+});
+
+// DELETE /settings/balance-override — clear the manual balance override.
+app.delete('/settings/balance-override', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  updateStatusLog({ _balanceOverrideMB: 0 });
+  console.log('⚖️  Balance override cleared via dashboard');
+  return res.json({ success: true, overrideMB: 0 });
 });
 
 // POST /settings/split-enabled — enable or disable the balance-drain file-split feature.

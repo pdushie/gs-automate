@@ -701,8 +701,13 @@
 
   <!-- Stats row -->
   <div class="stats">
-    <div class="card accent">
-      <div class="card-lbl">Data Balance</div>
+    <div class="card accent" id="balCard">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <div class="card-lbl">Data Balance</div>
+        <button id="overrideBtn" class="btn" onclick="openOverrideModal()"
+          style="font-size:0.72rem;padding:3px 9px;display:none"
+          title="Set a manual balance override advertised to external senders">Override</button>
+      </div>
       <div class="card-val" id="balVal">—</div>
       <div class="card-sub" id="balSub">Loading…</div>
     </div>
@@ -1030,14 +1035,34 @@ function summaryFingerprint(d) {
   return [
     d.balance?.mb, d.balance?.checkedAt,
     d.queue?.total, d.queue?.active, d.queue?.done, d.queue?.failed,
-    d.purchase?.status, d.batchCount?.today,
+    d.purchase?.status, d.batchCount?.today, d.balanceOverride?.active, d.balanceOverride?.overrideMB,
     d.files.map(f => f.filename + f.status + (f.completedAt||'') + (f.queuePosition??'')).join('|')
   ].join(':');
 }
 
 /* ── Render stats cards ──────────────────── */
 function renderStats(d) {
-  const { balance, queue, purchase, disk, batchCount } = d;
+  const { balance, queue, purchase, disk, batchCount, balanceOverride } = d;
+
+  // Balance override button visibility
+  const overrideBtn = document.getElementById('overrideBtn');
+  const balCard     = document.getElementById('balCard');
+  if (overrideBtn) overrideBtn.style.display = 'inline-flex';
+  if (balanceOverride && balanceOverride.active) {
+    balCard.style.outline = '2px solid var(--orange)';
+    overrideBtn.textContent = `⚠️ Override: ${(balanceOverride.overrideMB / 1024).toFixed(0)} GB`;
+    overrideBtn.style.background = 'var(--orange)';
+    overrideBtn.style.color = '#000';
+    overrideBtn.style.border = 'none';
+  } else {
+    balCard.style.outline = '';
+    if (overrideBtn) {
+      overrideBtn.textContent = 'Override';
+      overrideBtn.style.background = '';
+      overrideBtn.style.color = '';
+      overrideBtn.style.border = '';
+    }
+  }
 
   // Balance
   document.getElementById('balVal').textContent = fmtMB(balance.mb);
@@ -1941,6 +1966,36 @@ async function sendRetryCallback() {
   }
 
   btn.textContent = 'Send Callback';
+}
+
+/* ── Balance override modal ────────────────────────────── */
+async function openOverrideModal() {
+  let current = 0;
+  try {
+    const r = await fetch('/settings/balance-override');
+    if (r.ok) { const d = await r.json(); current = d.overrideMB || 0; }
+  } catch {}
+
+  const currentGB = current > 0 ? (current / 1024).toFixed(0) : '';
+  const input = prompt(
+    current > 0
+      ? `Balance override active: ${(current / 1024).toFixed(0)} GB advertised to senders.\nEnter new value in GB, or 0 to clear:`
+      : 'Enter balance override in GB (e.g. 1800 for 1.8 TB).\nSenders will see this value instead of the real balance.\nEnter 0 to clear any active override:',
+    currentGB
+  );
+  if (input === null) return; // cancelled
+  const gb = parseFloat(input);
+  if (isNaN(gb) || gb < 0) { alert('Invalid value. Enter a number ≥ 0.'); return; }
+
+  try {
+    const r = await fetch('/settings/balance-override', {
+      method:  gb === 0 ? 'DELETE' : 'POST',
+      headers: gb === 0 ? {} : { 'Content-Type': 'application/json' },
+      body:    gb === 0 ? undefined : JSON.stringify({ overrideGB: gb }),
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); alert('Failed: ' + (e.error || r.status)); return; }
+    await doRefresh();
+  } catch (e) { alert('Request failed: ' + e.message); }
 }
 
 /* ── Balance-drain split toggle ─────────────────────────── */
