@@ -60,6 +60,7 @@ let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const MAX_FILE_RETRIES = parseInt(process.env.MAX_FILE_RETRIES || '5');
+const MAX_SPLIT_B_CYCLES = parseInt(process.env.MAX_SPLIT_B_CYCLES || '3');
 
 function loadStatusLog() {
   try {
@@ -288,6 +289,7 @@ function getPendingFiles(folderPath) {
       if (uploaded.includes(f)) return false;
       if (statusLog[f] === 'ABANDONED') return false;
       if (statusLog[f] === 'SPLIT') return false; // original file already split into parts — parts are pending
+      if (statusLog[f] === 'STUCK') return false; // Part B exhausted all retry cycles — awaiting human intervention
       if (lockedSourceFiles.has(f)) return false; // owned by an active batch — do not re-queue
       return true;
     })
@@ -1229,6 +1231,25 @@ async function uploadFile(page, excelFile) {
               sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
               await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
             }
+          } else if (navAbandonLog[`${excelFile.name}_isSplitFinal`]) {
+            // Part B nav-abandoned — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
+            const originalFile = navAbandonLog[`${excelFile.name}_originalFile`] || excelFile.name;
+            const splitAttempt = (navAbandonLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
+            if (splitAttempt < MAX_SPLIT_B_CYCLES) {
+              updateStatusLog({
+                [excelFile.name]: null,
+                [`${excelFile.name}_timedOutAt`]: null,
+                [`${excelFile.name}_retryCount`]: 0,
+                [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+              });
+              sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") failed navigation ${retryCount} times (cycle ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
+            } else {
+              updateStatusLog({
+                [excelFile.name]: 'STUCK',
+                [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+              });
+              sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") has exhausted ${MAX_SPLIT_B_CYCLES} upload cycles. Please process manually.`);
+            }
           } else {
             sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
             await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
@@ -1421,6 +1442,25 @@ async function uploadFile(page, excelFile) {
           } else {
             sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
           }
+        } else if (failLog[`${excelFile.name}_isSplitFinal`]) {
+          // Part B failed — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
+          const originalFile = failLog[`${excelFile.name}_originalFile`] || excelFile.name;
+          const splitAttempt = (failLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
+          if (splitAttempt < MAX_SPLIT_B_CYCLES) {
+            updateStatusLog({
+              [excelFile.name]: null,
+              [`${excelFile.name}_failedAt`]: null,
+              [`${excelFile.name}_retryCount`]: 0,
+              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+            });
+            sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") was FAILED by MTN (attempt ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
+          } else {
+            updateStatusLog({
+              [excelFile.name]: 'STUCK',
+              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+            });
+            sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") failed all ${MAX_SPLIT_B_CYCLES} upload attempts. Please process manually.`);
+          }
         } else {
           sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
         }
@@ -1474,6 +1514,25 @@ async function uploadFile(page, excelFile) {
           } else {
             sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
             await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+          }
+        } else if (pollAbandonLog[`${excelFile.name}_isSplitFinal`]) {
+          // Part B poll-abandoned — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
+          const originalFile = pollAbandonLog[`${excelFile.name}_originalFile`] || excelFile.name;
+          const splitAttempt = (pollAbandonLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
+          if (splitAttempt < MAX_SPLIT_B_CYCLES) {
+            updateStatusLog({
+              [excelFile.name]: null,
+              [`${excelFile.name}_timedOutAt`]: null,
+              [`${excelFile.name}_retryCount`]: 0,
+              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+            });
+            sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") timed out ${retryCount} times (cycle ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
+          } else {
+            updateStatusLog({
+              [excelFile.name]: 'STUCK',
+              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
+            });
+            sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") has exhausted ${MAX_SPLIT_B_CYCLES} upload cycles. Please process manually.`);
           }
         } else {
           sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);

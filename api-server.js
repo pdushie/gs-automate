@@ -1153,6 +1153,28 @@ app.delete('/screenshots/:name', requireAuth, (req, res) => {
   }
 });
 
+// POST /screenshots/delete-bulk — delete multiple screenshots at once.
+// Body: { names: string[] }
+app.post('/screenshots/delete-bulk', requireAuth, (req, res) => {
+  const { names } = req.body || {};
+  if (!Array.isArray(names) || names.length === 0)
+    return res.status(400).json({ success: false, error: 'names must be a non-empty array' });
+  const deleted = [], errors = [];
+  for (const raw of names) {
+    const name = path.basename(raw);
+    if (!name.endsWith('.png')) { errors.push({ name, error: 'Only .png allowed' }); continue; }
+    const filePath = path.join(process.cwd(), name);
+    try {
+      if (fs.existsSync(filePath)) { fs.unlinkSync(filePath); deleted.push(name); }
+      else errors.push({ name, error: 'Not found' });
+    } catch (err) {
+      errors.push({ name, error: err.message });
+    }
+  }
+  if (deleted.length) console.log(`🗑️  Bulk deleted ${deleted.length} screenshot(s): ${deleted.join(', ')}`);
+  res.json({ success: true, deleted, errors });
+});
+
 // POST /cleanup — manually trigger file cleanup
 app.post('/cleanup', (req, res) => {
   console.log('🧹 Manual cleanup triggered via API');

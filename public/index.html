@@ -879,7 +879,17 @@
     <div class="panel">
       <div class="panel-hdr">
         <span class="panel-title">📸 Bot Screenshots</span>
-        <button class="btn" onclick="loadScreenshots()" style="font-size:0.78rem;padding:5px 12px">🔄 Refresh</button>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <label style="font-size:0.78rem;color:var(--muted);display:flex;align-items:center;gap:5px;cursor:pointer">
+            <input type="checkbox" id="ssSelectAll" onchange="toggleSelectAllScreenshots(this.checked)" style="cursor:pointer">
+            Select all
+          </label>
+          <button id="ssDeleteSelectedBtn" class="btn" onclick="deleteSelectedScreenshots()"
+            style="font-size:0.78rem;padding:5px 12px;background:#ef4444;color:#fff;border:none;display:none">
+            🗑️ Delete selected (<span id="ssSelectedCount">0</span>)
+          </button>
+          <button class="btn" onclick="loadScreenshots()" style="font-size:0.78rem;padding:5px 12px">🔄 Refresh</button>
+        </div>
       </div>
       <div id="screenshotsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;padding:18px">
         <div class="empty-cell" style="grid-column:1/-1"><span class="spin"></span> Loading…</div>
@@ -1531,7 +1541,32 @@ function setPageTab(tab) {
 }
 
 /* ── Screenshots ───────────────────────────── */
+function _updateSsDeleteBar() {
+  const checked = document.querySelectorAll('.ss-chk:checked').length;
+  const btn     = document.getElementById('ssDeleteSelectedBtn');
+  const allChk  = document.getElementById('ssSelectAll');
+  const countEl = document.getElementById('ssSelectedCount');
+  if (btn)     btn.style.display = checked > 0 ? 'inline-flex' : 'none';
+  if (countEl) countEl.textContent = checked;
+  if (allChk) {
+    const total = document.querySelectorAll('.ss-chk').length;
+    allChk.checked       = total > 0 && checked === total;
+    allChk.indeterminate = checked > 0 && checked < total;
+  }
+}
+
+function toggleSelectAllScreenshots(checked) {
+  document.querySelectorAll('.ss-chk').forEach(c => { c.checked = checked; });
+  _updateSsDeleteBar();
+}
+
 async function loadScreenshots() {
+  // Reset selection state
+  const allChk = document.getElementById('ssSelectAll');
+  if (allChk) { allChk.checked = false; allChk.indeterminate = false; }
+  const btn = document.getElementById('ssDeleteSelectedBtn');
+  if (btn) btn.style.display = 'none';
+
   const grid = document.getElementById('screenshotsGrid');
   grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1"><span class="spin"></span> Loading…</div>';
   try {
@@ -1543,16 +1578,21 @@ async function loadScreenshots() {
       const age = s.mtime ? new Date(s.mtime).toLocaleString() : '';
       const kb  = s.size ? `${(s.size/1024).toFixed(1)} KB` : '';
       const enc = encodeURIComponent(s.name);
+      const nameEsc = s.name.replace(/'/g, "\\'");
       return `<div id="ss-${enc}" style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column">
-        <a href="/screenshots/${enc}" target="_blank" style="display:block;background:#000;line-height:0">
-          <img src="/screenshots/${enc}" alt="${s.name}" loading="lazy"
-            style="width:100%;height:160px;object-fit:cover;object-position:top"
-            onerror="this.style.display='none'">
-        </a>
+        <label style="position:relative;display:block;background:#000;line-height:0;cursor:pointer">
+          <input type="checkbox" class="ss-chk" data-name="${s.name.replace(/"/g,'&quot;')}" onchange="_updateSsDeleteBar()"
+            style="position:absolute;top:8px;left:8px;width:18px;height:18px;cursor:pointer;z-index:1;accent-color:var(--accent)">
+          <a href="/screenshots/${enc}" target="_blank" onclick="event.stopPropagation()" style="display:block;line-height:0">
+            <img src="/screenshots/${enc}" alt="${s.name}" loading="lazy"
+              style="width:100%;height:160px;object-fit:cover;object-position:top"
+              onerror="this.style.display='none'">
+          </a>
+        </label>
         <div style="padding:8px 10px;flex:1">
           <div style="font-size:0.72rem;color:var(--text);word-break:break-all;font-weight:600;margin-bottom:3px">${s.name}</div>
           <div style="font-size:0.7rem;color:var(--muted);margin-bottom:6px">${age} · ${kb}</div>
-          <button onclick="deleteScreenshot('${s.name.replace(/'/g, "\\'")}')"
+          <button onclick="deleteScreenshot('${nameEsc}')"
             style="font-size:0.72rem;padding:3px 10px;background:#ef4444;color:#fff;border:none;border-radius:4px;cursor:pointer">
             🗑️ Delete
           </button>
@@ -1564,6 +1604,40 @@ async function loadScreenshots() {
   }
 }
 
+async function deleteSelectedScreenshots() {
+  const checked = [...document.querySelectorAll('.ss-chk:checked')];
+  if (!checked.length) return;
+  const names = checked.map(c => c.dataset.name);
+  if (!confirm(`Delete ${names.length} screenshot(s)?`)) return;
+  const btn = document.getElementById('ssDeleteSelectedBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/screenshots/delete-bulk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { alert('Bulk delete failed: ' + (d.error || r.status)); return; }
+    // Remove deleted cards from DOM
+    for (const name of (d.deleted || names)) {
+      const card = document.getElementById(`ss-${encodeURIComponent(name)}`);
+      if (card) card.remove();
+    }
+    if (d.errors && d.errors.length) {
+      alert(`${d.deleted.length} deleted. ${d.errors.length} failed:\n${d.errors.map(e => e.name + ': ' + e.error).join('\n')}`);
+    }
+    const grid = document.getElementById('screenshotsGrid');
+    if (grid && !grid.querySelector('[id^="ss-"]'))
+      grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1">No screenshots yet.</div>';
+    _updateSsDeleteBar();
+  } catch (err) {
+    alert(`Request failed: ${err.message}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function deleteScreenshot(name) {
   if (!confirm(`Delete "${name}"?`)) return;
   try {
@@ -1572,10 +1646,9 @@ async function deleteScreenshot(name) {
       const card = document.getElementById(`ss-${encodeURIComponent(name)}`);
       if (card) card.remove();
       const grid = document.getElementById('screenshotsGrid');
-      if (grid && !grid.querySelector('[id^="ss-"]')) {
+      if (grid && !grid.querySelector('[id^="ss-"]'))
         grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1">No screenshots yet.</div>';
-      }
-    } else {
+      _updateSsDeleteBar();
       const d = await r.json().catch(() => ({}));
       alert(`Delete failed: ${d.error || r.status}`);
     }
