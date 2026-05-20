@@ -24,7 +24,9 @@ const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.
 const IDLE_REFRESH_INTERVAL = 25 * 1000;
 
 // Transient network error patterns — these are portal/connection blips, not code bugs.
-const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::/i;
+// Transient network / navigation error patterns — portal blips and Playwright
+// navigation timeouts are both retriable; only logic/auth errors are fatal.
+const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::|Timeout.*exceeded/i;
 
 // page.goto with automatic retry on transient network errors (up to maxRetries attempts).
 async function gotoWithRetry(page, url, opts, maxRetries = 3) {
@@ -443,7 +445,12 @@ async function login(page) {
 
   } catch (err) {
     console.error('❌ Login failed:', err.message);
-    sendAlert('❌ MTN GroupShare — Login Failed', err.message);
+    // Suppress alert for transient network errors — the caller's retry loop handles those
+    // and sends its own "Portal Down?" alert. Only alert for genuine login failures
+    // (bad credentials, OTP timeout, unexpected page state, etc.).
+    if (!TRANSIENT_NAV_ERR.test(err.message)) {
+      sendAlert('❌ MTN GroupShare — Login Failed', err.message);
+    }
     throw err;
   }
 
@@ -1659,6 +1666,8 @@ async function run() {
     ]
   });
 
+  // context.addInitScript applies to every page opened from this context,
+  // including pages we create fresh on login retries.
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 720 },
@@ -1678,17 +1687,18 @@ async function run() {
   });
 
   // ── KEY FIX: page from context (not browser) — applies all headers + userAgent ──
-  const page = await context.newPage();
-
-  // Hide Playwright's automation fingerprint from WAF detection
-  await page.addInitScript(() => {
+  // Hide Playwright's automation fingerprint from WAF detection on all pages.
+  await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
+  let page = await context.newPage();
 
   try {
     // Retry initial login indefinitely when the portal is unreachable (service down).
     // Uses increasing backoff: 1 → 2 → 4 → 8 → 16 → 30 min (capped), then holds at 30 min.
     // Non-transient errors (bad credentials, OTP timeout, etc.) are still fatal.
+    // On each retry the stale page is closed and a fresh one opened — this clears any
+    // accumulated Playwright navigation state from the previous failed attempt.
     let _serviceDownAttempt = 0;
     while (true) {
       try {
@@ -1702,6 +1712,9 @@ async function run() {
           console.log(`⏳ Retrying in ${backoffMins} minute(s)...`);
           sendAlert('⚠️ MTN GroupShare — Portal Down?', `Service unreachable (attempt ${_serviceDownAttempt}). Retrying in ${backoffMins} min.`);
           await new Promise(r => setTimeout(r, backoffMins * 60 * 1000));
+          // Close the stale page and open a fresh one before the next attempt
+          try { await page.close(); } catch {}
+          page = await context.newPage();
           // loop and retry
         } else {
           throw loginErr; // non-transient — let fatal handler deal with it
@@ -1719,6 +1732,9 @@ async function run() {
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
         sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired. Re-logging in automatically...');
+        // Close stale page and open a fresh one before attempting re-login
+        try { await page.close(); } catch {}
+        page = await context.newPage();
         try {
           await login(page);
         } catch (loginErr) {
@@ -1924,6 +1940,8 @@ async function run() {
         } else {
           if (!await isSessionActive(page)) {
             console.log('🔒 Session lost before upload — re-logging in...');
+            try { await page.close(); } catch {}
+            page = await context.newPage();
             try {
               await login(page);
             } catch (loginErr) {
