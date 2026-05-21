@@ -331,10 +331,11 @@ function parseBalanceToMB(balanceText) {
 
 async function isSessionActive(page) {
   try {
-    // Use 'load' as primary waitUntil — more forgiving than 'networkidle' on slow connections.
-    // Fall back gracefully if navigation times out (portal slow but session still valid).
+    // Use gotoWithRetry so a single brief blip doesn't incorrectly invalidate a
+    // live session. Keep timeout short (15s) and retries low (2) so the check
+    // stays fast; fall back to URL check if even retries time out.
     try {
-      await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 30000 });
+      await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 15000 }, 2);
     } catch (navErr) {
       // Navigation timed out — check current URL anyway before giving up
       if (!page.url().includes('up2u.mtn.com.gh')) throw navErr;
@@ -1666,9 +1667,9 @@ async function run() {
     ]
   });
 
-  // context.addInitScript applies to every page opened from this context,
-  // including pages we create fresh on login retries.
-  const context = await browser.newContext({
+  // Browser context options — extracted so they can be reused when recreating
+  // the context after repeated login failures (stale TCP/DNS state recovery).
+  const contextOptions = {
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 720 },
     extraHTTPHeaders: {
@@ -1684,10 +1685,22 @@ async function run() {
       'sec-fetch-site': 'none',
       'sec-fetch-user': '?1',
     }
-  });
+  };
 
-  // ── KEY FIX: page from context (not browser) — applies all headers + userAgent ──
-  // Hide Playwright's automation fingerprint from WAF detection on all pages.
+  // Helper: tear down the current browser context and build a brand-new one.
+  // Called after repeated login failures to clear Chromium's stale TCP/DNS cache.
+  async function recreateContext() {
+    try { await context.close(); } catch {}
+    context = await browser.newContext(contextOptions);
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    });
+    page = await context.newPage();
+  }
+
+  // context.addInitScript applies to every page opened from this context,
+  // including pages we create fresh on login retries.
+  let context = await browser.newContext(contextOptions);
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
@@ -1712,9 +1725,9 @@ async function run() {
           console.log(`⏳ Retrying in ${backoffMins} minute(s)...`);
           sendAlert('⚠️ MTN GroupShare — Portal Down?', `Service unreachable (attempt ${_serviceDownAttempt}). Retrying in ${backoffMins} min.`);
           await new Promise(r => setTimeout(r, backoffMins * 60 * 1000));
-          // Close the stale page and open a fresh one before the next attempt
-          try { await page.close(); } catch {}
-          page = await context.newPage();
+          // Recreate the entire browser context (not just the page) to clear any
+          // stale Chromium TCP/DNS state before the next login attempt.
+          await recreateContext();
           // loop and retry
         } else {
           throw loginErr; // non-transient — let fatal handler deal with it
@@ -1732,17 +1745,31 @@ async function run() {
       if (!await isSessionActive(page)) {
         console.log('🔒 Session lost — re-logging in...');
         sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired. Re-logging in automatically...');
-        // Close stale page and open a fresh one before attempting re-login
-        try { await page.close(); } catch {}
-        page = await context.newPage();
-        try {
-          await login(page);
-        } catch (loginErr) {
-          console.warn(`⚠️  Login failed (portal may be down): ${loginErr.message}`);
-          console.log('⏳ Waiting 5 minutes before retrying...');
-          sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed. Will retry in 5 minutes.');
-          await new Promise(r => setTimeout(r, 5 * 60 * 1000));
-          continue;
+        let reloginOk = false;
+        let _reloginAttempt = 0;
+        while (!reloginOk) {
+          _reloginAttempt++;
+          // Every 3rd consecutive failure, recreate the entire browser context to clear
+          // any stale Chromium TCP/DNS state that may be causing ERR_EMPTY_RESPONSE
+          // even when the portal is actually accessible.
+          if (_reloginAttempt > 1 && (_reloginAttempt % 3 === 1)) {
+            console.warn(`⚠️  Recreating browser context after ${_reloginAttempt - 1} failed re-login attempt(s)...`);
+            await recreateContext();
+          } else {
+            try { await page.close(); } catch {}
+            page = await context.newPage();
+          }
+          try {
+            await login(page);
+            reloginOk = true;
+          } catch (loginErr) {
+            if (!TRANSIENT_NAV_ERR.test(loginErr.message)) throw loginErr; // non-transient — fatal
+            const backoffMins = Math.min(30, Math.pow(2, _reloginAttempt - 1));
+            console.warn(`⚠️  Re-login failed (attempt ${_reloginAttempt}) — portal may be down: ${loginErr.message}`);
+            console.log(`⏳ Retrying in ${backoffMins} minute(s)...`);
+            sendAlert('⚠️ MTN GroupShare — Portal Down?', `Re-login failed (attempt ${_reloginAttempt}). Retrying in ${backoffMins} min.`);
+            await new Promise(r => setTimeout(r, backoffMins * 60 * 1000));
+          }
         }
       }
 
@@ -1940,15 +1967,27 @@ async function run() {
         } else {
           if (!await isSessionActive(page)) {
             console.log('🔒 Session lost before upload — re-logging in...');
-            try { await page.close(); } catch {}
-            page = await context.newPage();
-            try {
-              await login(page);
-            } catch (loginErr) {
-              console.warn(`⚠️  Login failed before upload (portal may be down): ${loginErr.message}`);
-              sendAlert('⚠️ MTN GroupShare — Portal Down?', 'Login failed before upload. Will retry in 5 minutes.');
-              await new Promise(r => setTimeout(r, 5 * 60 * 1000));
-              continue;
+            let reloginOk = false;
+            let _preUploadReloginAttempt = 0;
+            while (!reloginOk) {
+              _preUploadReloginAttempt++;
+              if (_preUploadReloginAttempt > 1 && (_preUploadReloginAttempt % 3 === 1)) {
+                console.warn(`⚠️  Recreating browser context after ${_preUploadReloginAttempt - 1} failed re-login attempt(s)...`);
+                await recreateContext();
+              } else {
+                try { await page.close(); } catch {}
+                page = await context.newPage();
+              }
+              try {
+                await login(page);
+                reloginOk = true;
+              } catch (loginErr) {
+                if (!TRANSIENT_NAV_ERR.test(loginErr.message)) throw loginErr;
+                const backoffMins = Math.min(30, Math.pow(2, _preUploadReloginAttempt - 1));
+                console.warn(`⚠️  Re-login failed before upload (attempt ${_preUploadReloginAttempt}): ${loginErr.message}`);
+                sendAlert('⚠️ MTN GroupShare — Portal Down?', `Re-login failed before upload (attempt ${_preUploadReloginAttempt}). Retrying in ${backoffMins} min.`);
+                await new Promise(r => setTimeout(r, backoffMins * 60 * 1000));
+              }
             }
           }
 
