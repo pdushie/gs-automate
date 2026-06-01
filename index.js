@@ -1951,7 +1951,8 @@ async function run() {
             const splitLog = loadStatusLog();
             const splitCandidate = [...pendingFiles]
               .filter(f => f.totalMB > 0
-                && !splitLog[`${f.name}_isSplitIntermediate`]) // don't re-split Part A (still in-flight)
+                && !splitLog[`${f.name}_isSplitIntermediate`]  // don't re-split Part A (still in-flight)
+                && !splitLog[`${f.name}_startedAt`])            // never split a file that was ever submitted to MTN — the upload may have landed even if the bot lost the redirect; splitting would cause double-processing
               .sort((a, b) => a.totalMB - b.totalMB)[0]; // smallest file = least overshoot
             if (splitCandidate) {
               try {
@@ -1961,6 +1962,18 @@ async function run() {
               } catch (splitErr) {
                 console.warn(`⚠️  File split failed for "${splitCandidate.name}": ${splitErr.message}`);
                 sendAlert('⚠️ MTN GroupShare — Split Failed', `Could not split "${splitCandidate.name}": ${splitErr.message}`);
+              }
+            } else {
+              // All oversized pending files were previously submitted to MTN — splitting them
+              // risks double-processing.  Alert for manual intervention.
+              const blockedNames = pendingFiles
+                .filter(f => f.totalMB > 0 && splitLog[`${f.name}_startedAt`])
+                .map(f => f.name)
+                .join(', ');
+              if (blockedNames) {
+                const msg = `Balance (${(availableMB / 1024).toFixed(2)} GB) is too low for pending file(s) but they were previously submitted — cannot split safely. Manual check required: ${blockedNames}`;
+                console.warn(`⚠️  ${msg}`);
+                sendAlert('⚠️ MTN GroupShare — Previously-Submitted File Blocked', msg);
               }
             }
           }
