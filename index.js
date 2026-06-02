@@ -1197,6 +1197,75 @@ async function uploadFile(page, excelFile) {
       console.warn(`⚠️  Recovery nav to upload-status failed: ${recoveryErr.message}`);
     }
 
+    // Recovery step 2: check Manage Beneficiaries Groups for a group already created by
+    // this upload. The group name matches `fileName` (file name without extension).
+    // If found, complete the share flow — View Beneficiaries → Share → OK → poll DONE.
+    if (!recoveredToStatusPage) {
+      console.log(`🔍 Checking Manage Groups page for group "${fileName}"...`);
+      try {
+        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 20000 });
+        await page.waitForTimeout(2000);
+
+        // Open the column filter and search by group name
+        await page.click('span.k-i-filter');
+        await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
+        await page.fill('input[title="Value"].k-textbox', fileName);
+        await page.click('button[title="Filter"].k-button');
+        await page.waitForTimeout(3000); // wait for grid to refresh
+
+        const groupFound = await page.evaluate((name) => {
+          for (const row of document.querySelectorAll('tr.k-master-row')) {
+            if (row.textContent.includes(name)) return true;
+          }
+          return false;
+        }, fileName);
+
+        if (groupFound) {
+          console.log(`✅ Group "${fileName}" found on manage-groups — completing share flow...`);
+
+          // Click the Manage group dropdown button in the matching row
+          await page.evaluate((name) => {
+            for (const row of document.querySelectorAll('tr.k-master-row')) {
+              if (row.textContent.includes(name)) {
+                row.querySelector('button[aria-haspopup="true"]')?.click();
+                break;
+              }
+            }
+          }, fileName);
+
+          // Wait for the dropdown and click View Beneficiaries
+          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 5000 });
+          const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 30000 });
+          await page.click('a:has-text("View Beneficiaries")');
+          await viewBenefNavPromise;
+          console.log('✅ Beneficiaries page loaded');
+
+          // Click Share
+          await page.waitForSelector('#uploadList', { timeout: 10000 });
+          await page.click('#uploadList');
+          console.log('✅ Share clicked');
+
+          // Confirm OK and wait for upload-status
+          await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 30000 });
+          await page.waitForTimeout(500);
+          const mgStatusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 240000 });
+          await page.click('.uk-button-primary:has-text("Ok")');
+          console.log('✅ Confirmation accepted');
+          await mgStatusNavPromise;
+          console.log('✅ Recovered via manage-groups — on upload-status, polling for DONE...');
+
+          if (!excelFile.isMerged) {
+            updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
+          }
+          recoveredToStatusPage = true;
+        } else {
+          console.log(`ℹ️  Group "${fileName}" not found on manage-groups — treating as genuine nav failure`);
+        }
+      } catch (manageGroupsErr) {
+        console.warn(`⚠️  Manage-groups recovery failed: ${manageGroupsErr.message}`);
+      }
+    }
+
     if (!recoveredToStatusPage) {
       // Genuine navigation failure — apply retry / abandon logic
       const currentStatus = loadStatusLog();
