@@ -312,6 +312,7 @@ function cleanupOldFiles() {
           delete freshLog[filename + '_timedOutAt'];
           delete freshLog[filename + '_retryCount'];
           delete freshLog[filename + '_failedAt'];
+          delete freshLog[filename + '_processingDurationMs'];
           // Split-part specific keys
           delete freshLog[filename + '_isSplitIntermediate'];
           delete freshLog[filename + '_isSplitFinal'];
@@ -719,6 +720,7 @@ function resolveFileStatus(filename, uploaded, statusLog) {
       orderId: (mergedSrcEntry?.orderId) || statusLog[filename + '_orderId'] || null,
       orderIds: (mergedSrcEntry?.orderIds) || statusLog[filename + '_orderIds'] || null,
       mergedBatch,
+      processingDurationMs: statusLog[filename + '_processingDurationMs'] ?? mergedBatchVal?.processingDurationMs ?? null,
     };
   }
 
@@ -734,6 +736,7 @@ function resolveFileStatus(filename, uploaded, statusLog) {
       orderId: mergedSrcEntry.orderId || null,
       orderIds: mergedSrcEntry.orderIds || null,
       mergedBatch,
+      processingDurationMs: mergedBatchVal.processingDurationMs ?? null,
     };
   }
 
@@ -746,6 +749,7 @@ function resolveFileStatus(filename, uploaded, statusLog) {
       orderId: statusLog[filename + '_orderId'] || null,
       orderIds: statusLog[filename + '_orderIds'] || null,
       mergedBatch,
+      processingDurationMs: statusLog[filename + '_processingDurationMs'] ?? null,
     };
   }
 
@@ -1442,16 +1446,17 @@ app.get('/summary', requireAuth, (req, res) => {
           : null;
 
         const entry = {
-          filename:    f,
-          status:      resolved.status,
+          filename:             f,
+          status:               resolved.status,
           totalDataGB,
-          queuedAt:    resolved.queuedAt   || null,
-          startedAt:   statusLog[`${f}_startedAt`]  || null,
-          completedAt: resolved.completedAt || null,
-          failedAt:    statusLog[`${f}_failedAt`]   || null,
-          timedOutAt:  statusLog[`${f}_timedOutAt`] || null,
-          retryCount:  statusLog[`${f}_retryCount`] || 0,
-          mergedBatch: resolved.mergedBatch || null,
+          queuedAt:             resolved.queuedAt   || null,
+          startedAt:            statusLog[`${f}_startedAt`]  || null,
+          completedAt:          resolved.completedAt || null,
+          failedAt:             statusLog[`${f}_failedAt`]   || null,
+          timedOutAt:           statusLog[`${f}_timedOutAt`] || null,
+          retryCount:           statusLog[`${f}_retryCount`] || 0,
+          mergedBatch:          resolved.mergedBatch || null,
+          processingDurationMs: statusLog[`${f}_processingDurationMs`] ?? resolved.processingDurationMs ?? null,
         };
 
         if (resolved.orderIds)     entry.orderIds = resolved.orderIds;

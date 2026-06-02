@@ -1122,9 +1122,11 @@ async function uploadFile(page, excelFile) {
           withFileLock(STATUS_LOG, () => {
             const l = loadStatusLog();
             const rec = l[excelFile.name] || {};
+            const queuedMs = rec.queuedAt ? new Date(rec.queuedAt).getTime() : null;
             rec.status = 'DONE';
             rec.completedAt = completedAt;
             rec.note = `Marked done — duplicate group name. Portal: ${portalError}`;
+            if (queuedMs) rec.processingDurationMs = Date.now() - queuedMs;
             l[excelFile.name] = rec;
             atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
           });
@@ -1152,10 +1154,13 @@ async function uploadFile(page, excelFile) {
           markAsUploaded(excelFile.name);
         } else {
           markAsUploaded(excelFile.name);
+          const dupQueuedAt = loadStatusLog()[`${excelFile.name}_queuedAt`];
+          const dupDurationMs = dupQueuedAt ? Date.now() - new Date(dupQueuedAt).getTime() : null;
           updateStatusLog({
             [excelFile.name]: 'DONE',
             [`${excelFile.name}_completedAt`]: completedAt,
             [`${excelFile.name}_note`]: `Marked done — portal rejected upload (duplicate group name). Portal message: ${portalError}`,
+            ...(dupDurationMs != null ? { [`${excelFile.name}_processingDurationMs`]: dupDurationMs } : {}),
           });
           await sendCallback(excelFile.name, 'DONE', completedAt);
         }
@@ -1430,8 +1435,10 @@ async function uploadFile(page, excelFile) {
         withFileLock(STATUS_LOG, () => {
           const l = loadStatusLog();
           const rec = l[excelFile.name] || {};
+          const queuedMs = rec.queuedAt ? new Date(rec.queuedAt).getTime() : null;
           rec.status = 'DONE';
           rec.completedAt = completedAt;
+          if (queuedMs) rec.processingDurationMs = Date.now() - queuedMs;
           l[excelFile.name] = rec;
           atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
         });
@@ -1465,9 +1472,12 @@ async function uploadFile(page, excelFile) {
       } else {
         // ── Single file / split part ──────────────────────────────────────
         markAsUploaded(excelFile.name);
+        const singleQueuedAt = loadStatusLog()[`${excelFile.name}_queuedAt`];
+        const singleDurationMs = singleQueuedAt ? Date.now() - new Date(singleQueuedAt).getTime() : null;
         updateStatusLog({
           [excelFile.name]: 'DONE',
           [`${excelFile.name}_completedAt`]: completedAt,
+          ...(singleDurationMs != null ? { [`${excelFile.name}_processingDurationMs`]: singleDurationMs } : {}),
         });
 
         const splitLog = loadStatusLog();

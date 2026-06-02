@@ -815,11 +815,12 @@
               <th>Order ID(s)</th>
               <th>Queued</th>
               <th>Completed</th>
+              <th>Duration</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="tbody">
-            <tr><td colspan="8" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
+            <tr><td colspan="9" class="empty-cell"><span class="spin"></span> Loading…</td></tr>
           </tbody>
         </table>
         <div id="filesPagination"></div>
@@ -981,6 +982,17 @@ function fmtDate(iso) {
   if (ms < 86_400_000)    return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
   return d.toLocaleDateString([], { month:'short', day:'numeric' }) + ' ' +
          d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+}
+
+function fmtDuration(ms) {
+  if (ms == null || ms < 0) return '—';
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 function esc(s) {
@@ -1239,6 +1251,7 @@ function renderTable(files, q) {
       ['Queue position',  f.queuePosition != null ? (f.queuePosition === 0 ? 'Currently active' : `#${f.queuePosition}`) : '—'],
       ['Started',         f.startedAt   ? fmtDate(f.startedAt)  + ' (' + new Date(f.startedAt).toLocaleString() + ')' : '—'],
       ['Completed',       completedIso  ? fmtDate(completedIso) + ' (' + new Date(completedIso).toLocaleString() + ')' : '—'],
+      ['Duration',        f.processingDurationMs != null ? fmtDuration(f.processingDurationMs) : '—'],
       ['Retry count',     f.retryCount  ? String(f.retryCount) : '0'],
     ];
     if (f.mergedBatch) {
@@ -1255,10 +1268,11 @@ function renderTable(files, q) {
       <td>${pillsHtml}</td>
       <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(f.queuedAt))}</td>
       <td style="white-space:nowrap;font-size:0.77rem;color:var(--muted)">${esc(fmtDate(completedIso))}</td>
+      <td style="white-space:nowrap;font-size:0.77rem;color:${f.processingDurationMs != null ? 'var(--green)' : 'var(--muted)'}">${esc(fmtDuration(f.processingDurationMs))}</td>
       <td style="color:var(--muted);font-size:0.75rem;padding-right:12px"><span class="row-chevron" id="chev-${detId}">&#9660;</span></td>
     </tr>
     <tr class="detail-row" id="${detId}">
-      <td colspan="8"><div class="detail-collapse"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;gap:6px;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3)" data-filename="${esc(f.filename)}" onclick="event.stopPropagation();markAbandoned(this.dataset.filename)">🚫 Mark Abandoned</button></div></div></div></td>
+      <td colspan="9"><div class="detail-collapse"><div class="detail-inner">${details}<div style="margin-left:auto;display:flex;align-items:flex-end;gap:6px;padding-left:12px"><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap" data-filename="${esc(f.filename)}" data-ids="${esc(JSON.stringify(ids))}" onclick="event.stopPropagation();openRetryCallback(this.dataset.filename,JSON.parse(this.dataset.ids||'[]'))">📡 Retry Callback</button><button class="btn" style="font-size:0.73rem;padding:5px 12px;white-space:nowrap;background:rgba(239,68,68,0.15);color:#f87171;border-color:rgba(239,68,68,0.3)" data-filename="${esc(f.filename)}" onclick="event.stopPropagation();markAbandoned(this.dataset.filename)">🚫 Mark Abandoned</button></div></div></div></td>
     </tr>`;
   }).join('');
 }
