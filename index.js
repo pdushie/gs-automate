@@ -374,7 +374,7 @@ async function login(page) {
       timeout: 240000
     });
 
-    await page.screenshot({ path: 'login-debug.png', fullPage: true });
+    await page.screenshot({ path: 'login-debug.png', fullPage: true, timeout: 180000 });
     console.log('📸 Screenshot saved — login-debug.png');
 
     if (page.url().includes('/account/verify-otp')) {
