@@ -1692,7 +1692,7 @@ async function run() {
     const startupLog = loadStatusLog();
     const startupUpdates = {};
     for (const [key, val] of Object.entries(startupLog)) {
-      if (typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
+      if (val === null || typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
       if (val.status === 'IN_PROGRESS') {
         startupUpdates[key] = { ...val, status: 'PENDING' };
         console.warn(`⚠️  Startup: batch "${key}" was IN_PROGRESS — reset to PENDING (source files re-queued)`);
