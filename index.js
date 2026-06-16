@@ -1077,7 +1077,7 @@ async function uploadFile(page, excelFile) {
 
   try {
     await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
-    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 240000 });
+    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 900000 });
     await page.click('button.k-upload-selected');
     console.log('✅ Upload clicked');
 
@@ -1208,7 +1208,7 @@ async function uploadFile(page, excelFile) {
     if (!recoveredToStatusPage) {
       console.log(`🔍 Checking Manage Groups page for group "${fileName}"...`);
       try {
-        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 20000 });
+        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
         await page.waitForTimeout(2000);
 
         // Open the column filter and search by group name
@@ -1239,8 +1239,8 @@ async function uploadFile(page, excelFile) {
           }, fileName);
 
           // Wait for the dropdown and click View Beneficiaries
-          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 5000 });
-          const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 30000 });
+          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
+          const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
           await page.click('a:has-text("View Beneficiaries")');
           await viewBenefNavPromise;
           console.log('✅ Beneficiaries page loaded');
@@ -1857,6 +1857,26 @@ async function run() {
         console.log('💰 Balance refresh requested via API — refreshing now...');
         updateStatusLog({ _balanceRefreshRequested: false });
         await checkBalance(page, context);
+      }
+
+      // DEBUG: Navigate to manage-groups → View Beneficiaries (triggered from dashboard button)
+      if (loadStatusLog()._debugNavBeneficiaries) {
+        updateStatusLog({ _debugNavBeneficiaries: false });
+        console.log('🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test...');
+        try {
+          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
+          console.log('🐛 [DEBUG] manage-groups loaded — waiting up to 15 min for View Beneficiaries link...');
+          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
+          const debugBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
+          await page.click('a:has-text("View Beneficiaries")');
+          await debugBenefNavPromise;
+          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅');
+          updateStatusLog({ _debugNavResult: 'OK', _debugNavAt: new Date().toISOString() });
+        } catch (debugErr) {
+          console.error(`🐛 [DEBUG] View Beneficiaries nav failed: ${debugErr.message}`);
+          updateStatusLog({ _debugNavResult: 'FAILED', _debugNavError: debugErr.message, _debugNavAt: new Date().toISOString() });
+        }
+        continue;
       }
 
       // Service a data purchase requested by POST /purchase

@@ -2294,6 +2294,22 @@ async function runEvdAutoLoader() {
 }
 
 
+// POST /debug/nav-beneficiaries — DEBUG: signals the bot to navigate to manage-groups
+// and click View Beneficiaries, logging success/failure. Remove once testing is done.
+app.post('/debug/nav-beneficiaries', (req, res) => {
+  if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  withFileLock(STATUS_LOG, () => {
+    const log = loadStatusLog();
+    log._debugNavBeneficiaries = true;
+    log._debugNavResult = null;
+    log._debugNavError  = null;
+    log._debugNavAt     = null;
+    atomicWrite(STATUS_LOG, JSON.stringify(log, null, 2));
+  });
+  console.log('🐛 [DEBUG] View Beneficiaries nav test requested via dashboard');
+  return res.json({ success: true, note: 'Bot will navigate to manage-groups → View Beneficiaries. Check bot logs for result.' });
+});
+
 // POST /bot/restart — signals start.js to kill and restart the bot process.
 // start.js polls the status log every 5 s for this flag and re-spawns the bot.
 app.post('/bot/restart', (req, res) => {
