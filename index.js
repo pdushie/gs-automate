@@ -278,7 +278,7 @@ function getPendingFiles(folderPath) {
   //     mechanism silently deadlocks instead.
   const lockedSourceFiles = new Set();
   for (const val of Object.values(statusLog)) {
-    if (typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
+    if (val === null || typeof val !== 'object' || !val.sourceFiles || !val.status) continue;
     if (['IN_PROGRESS', 'PROCESSING', 'DONE'].includes(val.status)) {
       for (const sf of val.sourceFiles) lockedSourceFiles.add(sf.filename);
     }
@@ -805,7 +805,7 @@ function buildMergedFile(files) {
       // Fallback: scan all previous merged batch records for this source file
       let bestCreatedAt = null;
       for (const [, val] of Object.entries(log)) {
-        if (typeof val !== 'object' || !val.sourceFiles || !val.createdAt) continue;
+        if (val === null || typeof val !== 'object' || !val.sourceFiles || !val.createdAt) continue;
         const prev = val.sourceFiles.find(s => s.filename === f.name);
         if (!prev) continue;
         if (!bestCreatedAt || val.createdAt > bestCreatedAt) {
@@ -1719,7 +1719,7 @@ async function run() {
     const doneLog = loadStatusLog();
     const completionUpdates = {};
     for (const [key, val] of Object.entries(doneLog)) {
-      if (typeof val !== 'object' || !val.sourceFiles || val.status !== 'DONE') continue;
+      if (val === null || typeof val !== 'object' || !val.sourceFiles || val.status !== 'DONE') continue;
       for (const src of val.sourceFiles) {
         if (!src.filename) continue;
         const alreadyUploaded = loadUploadedLog().includes(src.filename);
@@ -1937,7 +1937,7 @@ async function run() {
           const idleStatusLog = loadStatusLog();
           const idleUpdates = {};
           for (const [key, val] of Object.entries(idleStatusLog)) {
-            if (typeof val !== 'object' || !val.sourceFiles || val.status !== 'PROCESSING') continue;
+            if (val === null || typeof val !== 'object' || !val.sourceFiles || val.status !== 'PROCESSING') continue;
             const queuedMs = new Date(val.queuedAt || val.startedAt || val.createdAt).getTime();
             if (Date.now() - queuedMs > BATCH_PROCESSING_TIMEOUT_MS) {
               idleUpdates[key] = { ...val, status: 'TIMEOUT' };
