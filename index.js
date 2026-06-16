@@ -1232,16 +1232,16 @@ async function uploadFile(page, excelFile) {
           await page.evaluate((name) => {
             for (const row of document.querySelectorAll('tr.k-master-row')) {
               if (row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"]')?.click();
+                row.querySelector('button[aria-haspopup="true"].uk-button')?.click();
                 break;
               }
             }
           }, fileName);
 
           // Wait for the dropdown and click View Beneficiaries
-          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
+          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 900000 });
           const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
-          await page.click('a:has-text("View Beneficiaries")');
+          await page.click('a[href*="/beneficiaries/groups/"]');
           await viewBenefNavPromise;
           console.log('✅ Beneficiaries page loaded');
 
@@ -1890,7 +1890,7 @@ async function run() {
             const rows = document.querySelectorAll('tr.k-master-row');
             for (const row of rows) {
               if (!name || row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"]')?.click();
+                row.querySelector('button[aria-haspopup="true"].uk-button')?.click();
                 break;
               }
             }
@@ -1899,12 +1899,12 @@ async function run() {
           console.log('📸 Screenshot saved — debug-manage-group-dropdown.png');
 
           console.log('🐛 [DEBUG] Waiting for View Beneficiaries link in dropdown...');
-          await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
+          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-before-click.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-before-click.png');
 
           const debugBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
-          await page.click('a:has-text("View Beneficiaries")');
+          await page.click('a[href*="/beneficiaries/groups/"]');
           await debugBenefNavPromise;
           console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — saving screenshot...');
           await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
