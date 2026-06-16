@@ -1229,10 +1229,7 @@ async function uploadFile(page, excelFile) {
           console.log(`✅ Group "${fileName}" found on manage-groups — completing share flow...`);
 
           // Click the Manage group dropdown button in the matching row
-          const manageGroupBtn = page.locator('tr.k-master-row')
-            .filter({ hasText: fileName })
-            .locator('button[aria-haspopup="true"].uk-float-right')
-            .first();
+          const manageGroupBtn = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
           await manageGroupBtn.waitFor({ state: 'visible', timeout: 30000 });
           await manageGroupBtn.click();
           await page.waitForTimeout(1000);
@@ -1240,7 +1237,7 @@ async function uploadFile(page, excelFile) {
           console.log('📸 Screenshot saved — manage-group-dropdown.png');
 
           // Wait for the dropdown and click View Beneficiaries
-          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 900000 });
+          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 15000 });
           const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
           await page.click('a[href*="/beneficiaries/groups/"]');
           await viewBenefNavPromise;
@@ -1887,9 +1884,7 @@ async function run() {
 
           // Click the Manage group dropdown button (matching row if filtered, else first row)
           console.log('🐛 [DEBUG] Clicking Manage group dropdown button...');
-          const debugManageBtn = debugFileName
-            ? page.locator('tr.k-master-row').filter({ hasText: debugFileName }).locator('button[aria-haspopup="true"].uk-float-right').first()
-            : page.locator('tr.k-master-row').locator('button[aria-haspopup="true"].uk-float-right').first();
+          const debugManageBtn = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
           await debugManageBtn.waitFor({ state: 'visible', timeout: 30000 });
           await debugManageBtn.click();
           await page.waitForTimeout(1000);
@@ -1897,7 +1892,7 @@ async function run() {
           console.log('📸 Screenshot saved — debug-manage-group-dropdown.png');
 
           console.log('🐛 [DEBUG] Waiting for View Beneficiaries link in dropdown...');
-          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 900000 });
+          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 15000 });
           await page.screenshot({ path: 'debug-view-benef-before-click.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-before-click.png');
 
