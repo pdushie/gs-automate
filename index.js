@@ -1229,14 +1229,13 @@ async function uploadFile(page, excelFile) {
           console.log(`✅ Group "${fileName}" found on manage-groups — completing share flow...`);
 
           // Click the Manage group dropdown button in the matching row
-          await page.evaluate((name) => {
-            for (const row of document.querySelectorAll('tr.k-master-row')) {
-              if (row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"].uk-float-right')?.click();
-                break;
-              }
-            }
-          }, fileName);
+          const manageGroupBtn = page.locator('tr.k-master-row')
+            .filter({ hasText: fileName })
+            .locator('button[aria-haspopup="true"].uk-float-right')
+            .first();
+          await manageGroupBtn.waitFor({ state: 'visible', timeout: 30000 });
+          await manageGroupBtn.click();
+          await page.waitForTimeout(1000);
           await page.screenshot({ path: 'manage-group-dropdown.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — manage-group-dropdown.png');
 
@@ -1888,15 +1887,12 @@ async function run() {
 
           // Click the Manage group dropdown button (matching row if filtered, else first row)
           console.log('🐛 [DEBUG] Clicking Manage group dropdown button...');
-          await page.evaluate((name) => {
-            const rows = document.querySelectorAll('tr.k-master-row');
-            for (const row of rows) {
-              if (!name || row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"].uk-float-right')?.click();
-                break;
-              }
-            }
-          }, debugFileName);
+          const debugManageBtn = debugFileName
+            ? page.locator('tr.k-master-row').filter({ hasText: debugFileName }).locator('button[aria-haspopup="true"].uk-float-right').first()
+            : page.locator('tr.k-master-row').locator('button[aria-haspopup="true"].uk-float-right').first();
+          await debugManageBtn.waitFor({ state: 'visible', timeout: 30000 });
+          await debugManageBtn.click();
+          await page.waitForTimeout(1000);
           await page.screenshot({ path: 'debug-manage-group-dropdown.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-manage-group-dropdown.png');
 
