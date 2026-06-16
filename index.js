@@ -1861,15 +1861,44 @@ async function run() {
 
       // DEBUG: Navigate to manage-groups → View Beneficiaries (triggered from dashboard button)
       if (loadStatusLog()._debugNavBeneficiaries) {
+        const debugFileName = loadStatusLog()._debugNavFileName || null;
         updateStatusLog({ _debugNavBeneficiaries: false });
-        console.log('🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test...');
+        console.log(`🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test${debugFileName ? ` (file: "${debugFileName}")` : ' (first row)'}...`);
         try {
           await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
           console.log('🐛 [DEBUG] manage-groups loaded — saving screenshot...');
           await page.screenshot({ path: 'debug-manage-groups.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-manage-groups.png');
 
-          console.log('🐛 [DEBUG] Waiting up to 15 min for View Beneficiaries link...');
+          // If a file name was provided, filter the grid first
+          if (debugFileName) {
+            console.log(`🐛 [DEBUG] Filtering grid by "${debugFileName}"...`);
+            await page.waitForTimeout(2000);
+            await page.click('span.k-i-filter');
+            await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
+            await page.fill('input[title="Value"].k-textbox', debugFileName);
+            await page.click('button[title="Filter"].k-button');
+            console.log('🐛 [DEBUG] Filter applied — waiting up to 10 min for grid to refresh...');
+            await page.waitForTimeout(600000);
+            await page.screenshot({ path: 'debug-manage-groups-filtered.png', fullPage: true, timeout: 180000 });
+            console.log('📸 Screenshot saved — debug-manage-groups-filtered.png');
+          }
+
+          // Click the Manage group dropdown button (matching row if filtered, else first row)
+          console.log('🐛 [DEBUG] Clicking Manage group dropdown button...');
+          await page.evaluate((name) => {
+            const rows = document.querySelectorAll('tr.k-master-row');
+            for (const row of rows) {
+              if (!name || row.textContent.includes(name)) {
+                row.querySelector('button[aria-haspopup="true"]')?.click();
+                break;
+              }
+            }
+          }, debugFileName);
+          await page.screenshot({ path: 'debug-manage-group-dropdown.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — debug-manage-group-dropdown.png');
+
+          console.log('🐛 [DEBUG] Waiting for View Beneficiaries link in dropdown...');
           await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-before-click.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-before-click.png');

@@ -1897,11 +1897,17 @@ async function evdMarkDone(orderId, btn) {
 
 async function debugNavBeneficiaries() {
   const btn = document.getElementById('debugNavBenefBtn');
-  if (!confirm('Trigger a test navigation to manage-groups → View Beneficiaries?\nCheck the bot logs for the result.')) return;
+  const fileName = prompt('Enter group/file name to filter by (leave blank to use the first row):')?.trim() || '';
+  if (fileName === null) return; // cancelled
+  if (!confirm(`Trigger test navigation to manage-groups → View Beneficiaries${fileName ? ` (filter: "${fileName}")` : ' (first row)'}?\nCheck the bot logs for the result.`)) return;
   btn.disabled = true;
   btn.textContent = '⏳ Running…';
   try {
-    const r = await fetch('/debug/nav-beneficiaries', { method: 'POST' });
+    const r = await fetch('/debug/nav-beneficiaries', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: fileName || null })
+    });
     const d = await r.json();
     if (d.success) {
       btn.textContent = '✓ Triggered — check logs';

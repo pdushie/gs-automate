@@ -2298,15 +2298,17 @@ async function runEvdAutoLoader() {
 // and click View Beneficiaries, logging success/failure. Remove once testing is done.
 app.post('/debug/nav-beneficiaries', (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
+  const fileName = (req.body && req.body.fileName) ? String(req.body.fileName).trim() : null;
   withFileLock(STATUS_LOG, () => {
     const log = loadStatusLog();
     log._debugNavBeneficiaries = true;
+    log._debugNavFileName = fileName || null;
     log._debugNavResult = null;
     log._debugNavError  = null;
     log._debugNavAt     = null;
     atomicWrite(STATUS_LOG, JSON.stringify(log, null, 2));
   });
-  console.log('🐛 [DEBUG] View Beneficiaries nav test requested via dashboard');
+  console.log(`🐛 [DEBUG] View Beneficiaries nav test requested via dashboard${fileName ? ` (file: "${fileName}")` : ' (first row)'}`);
   return res.json({ success: true, note: 'Bot will navigate to manage-groups → View Beneficiaries. Check bot logs for result.' });
 });
 
