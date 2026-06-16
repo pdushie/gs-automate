@@ -1232,11 +1232,13 @@ async function uploadFile(page, excelFile) {
           await page.evaluate((name) => {
             for (const row of document.querySelectorAll('tr.k-master-row')) {
               if (row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"].uk-button')?.click();
+                row.querySelector('button[aria-haspopup="true"].uk-float-right')?.click();
                 break;
               }
             }
           }, fileName);
+          await page.screenshot({ path: 'manage-group-dropdown.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — manage-group-dropdown.png');
 
           // Wait for the dropdown and click View Beneficiaries
           await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 900000 });
@@ -1890,7 +1892,7 @@ async function run() {
             const rows = document.querySelectorAll('tr.k-master-row');
             for (const row of rows) {
               if (!name || row.textContent.includes(name)) {
-                row.querySelector('button[aria-haspopup="true"].uk-button')?.click();
+                row.querySelector('button[aria-haspopup="true"].uk-float-right')?.click();
                 break;
               }
             }
