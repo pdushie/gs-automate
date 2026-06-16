@@ -1216,7 +1216,7 @@ async function uploadFile(page, excelFile) {
         await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
         await page.fill('input[title="Value"].k-textbox', fileName);
         await page.click('button[title="Filter"].k-button');
-        await page.waitForTimeout(3000); // wait for grid to refresh
+        await page.waitForTimeout(600000); // wait for grid to refresh (can take up to 10 min)
 
         const groupFound = await page.evaluate((name) => {
           for (const row of document.querySelectorAll('tr.k-master-row')) {
@@ -1865,15 +1865,27 @@ async function run() {
         console.log('🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test...');
         try {
           await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
-          console.log('🐛 [DEBUG] manage-groups loaded — waiting up to 15 min for View Beneficiaries link...');
+          console.log('🐛 [DEBUG] manage-groups loaded — saving screenshot...');
+          await page.screenshot({ path: 'debug-manage-groups.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — debug-manage-groups.png');
+
+          console.log('🐛 [DEBUG] Waiting up to 15 min for View Beneficiaries link...');
           await page.waitForSelector('a:has-text("View Beneficiaries")', { timeout: 900000 });
+          await page.screenshot({ path: 'debug-view-benef-before-click.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — debug-view-benef-before-click.png');
+
           const debugBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
           await page.click('a:has-text("View Beneficiaries")');
           await debugBenefNavPromise;
-          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅');
+          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — saving screenshot...');
+          await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — debug-view-benef-loaded.png');
+
           updateStatusLog({ _debugNavResult: 'OK', _debugNavAt: new Date().toISOString() });
         } catch (debugErr) {
           console.error(`🐛 [DEBUG] View Beneficiaries nav failed: ${debugErr.message}`);
+          try { await page.screenshot({ path: 'debug-view-benef-error.png', fullPage: true, timeout: 180000 }); } catch {}
+          console.log('📸 Screenshot saved — debug-view-benef-error.png');
           updateStatusLog({ _debugNavResult: 'FAILED', _debugNavError: debugErr.message, _debugNavAt: new Date().toISOString() });
         }
         continue;
