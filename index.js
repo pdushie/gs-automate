@@ -1083,10 +1083,7 @@ async function uploadFile(page, excelFile) {
 
     await beneficiariesNavPromise;
     console.log('✅ Beneficiaries page loaded — waiting for Msisdn data to load...');
-    await page.waitForFunction(() => {
-      const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
-      return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
-    }, null, { timeout: 900000 });
+    await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
     console.log('✅ Data grid loaded');
 
     await page.waitForSelector('#uploadList', { timeout: 240000 });
@@ -1247,11 +1244,8 @@ async function uploadFile(page, excelFile) {
           await page.click('a[href*="/beneficiaries/groups/"]');
           await viewBenefNavPromise;
           console.log('✅ Beneficiaries page loaded — waiting for Msisdn data to load...');
-          // Wait for the grid to render rows with data in the Msisdn column
-          await page.waitForFunction(() => {
-            const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
-            return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
-          }, null, { timeout: 900000 });
+          // Wait for the first row to appear in the grid
+          await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
           await page.screenshot({ path: 'view-benef-grid-loaded.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — view-benef-grid-loaded.png');
 
@@ -1912,11 +1906,8 @@ async function run() {
           await page.click('a[href*="/beneficiaries/groups/"]');
           await debugBenefNavPromise;
           console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — waiting for Msisdn data to load...');
-          // Wait for the grid to render rows with data in the Msisdn column
-          await page.waitForFunction(() => {
-            const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
-            return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
-          }, null, { timeout: 900000 });
+          // Wait for the first row to appear in the grid
+          await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-loaded.png');
 

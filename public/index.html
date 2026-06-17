@@ -1664,6 +1664,7 @@ async function deleteScreenshot(name) {
       if (grid && !grid.querySelector('[id^="ss-"]'))
         grid.innerHTML = '<div class="empty-cell" style="grid-column:1/-1">No screenshots yet.</div>';
       _updateSsDeleteBar();
+    } else {
       const d = await r.json().catch(() => ({}));
       alert(`Delete failed: ${d.error || r.status}`);
     }
