@@ -1224,8 +1224,8 @@ async function uploadFile(page, excelFile) {
         await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
         await page.screenshot({ path: 'manage-groups-filter-clicked.png', fullPage: true, timeout: 180000 });
         console.log('📸 Screenshot saved — manage-groups-filter-clicked.png');
-        console.log('🔍 Filter applied — waiting for grid to refresh (up to 10 min)...');
-        await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
+        console.log('🔍 Filter applied — waiting for grid to refresh (timeout: 10 min)...');
+        await page.waitForLoadState('networkidle', { timeout: 600000 });
 
         const groupFound = await page.evaluate((name) => {
           for (const row of document.querySelectorAll('tr.k-master-row')) {
@@ -1895,8 +1895,8 @@ async function run() {
             await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
             await page.screenshot({ path: 'debug-manage-groups-filter-clicked.png', fullPage: true, timeout: 180000 });
             console.log('📸 Screenshot saved — debug-manage-groups-filter-clicked.png');
-            console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (up to 10 min)...');
-            await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
+            console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (timeout: 10 min)...');
+            await page.waitForLoadState('networkidle', { timeout: 600000 });
             await page.screenshot({ path: 'debug-manage-groups-filtered.png', fullPage: true, timeout: 180000 });
             console.log('📸 Screenshot saved — debug-manage-groups-filtered.png');
           }
