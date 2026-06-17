@@ -2153,6 +2153,33 @@ async function toggleSplitEnabled() {
 setProgressBar(1); // start bar full; countdown will drain it
 doRefresh().then(() => { startCountdown(); loadSplitToggle(); });
 setInterval(checkSession, 5 * 60 * 1000);
+
+// Keep the page active when tab is hidden — pause countdown on hide,
+// resume and trigger an immediate catch-up refresh on show.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearInterval(cdTimer);
+  } else {
+    // Tab is visible again — refresh immediately then restart countdown
+    doRefresh().then(() => startCountdown());
+  }
+});
+
+// Request a wake lock so the OS doesn't suspend the tab (supported in modern browsers).
+// Silently ignored if the API is unavailable or permission is denied.
+(async () => {
+  if ('wakeLock' in navigator) {
+    let wakeLock = null;
+    const acquire = async () => {
+      try { wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+    };
+    await acquire();
+    // Re-acquire after visibility change (wake lock is released when tab hides)
+    document.addEventListener('visibilitychange', async () => {
+      if (!document.hidden) await acquire();
+    });
+  }
+})();
 </script>
 </body>
 </html>
