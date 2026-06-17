@@ -1213,8 +1213,8 @@ async function uploadFile(page, excelFile) {
         await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
         await page.waitForTimeout(2000);
 
-        // Open the column filter and search by group name
-        await page.click('span.k-i-filter');
+        // Open the Group Name column filter
+        await page.click('th[data-field="GroupName"] a.k-grid-filter');
         await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
         await page.fill('input[title="Value"].k-textbox', fileName);
         await page.click('button[title="Filter"].k-button');
@@ -1879,7 +1879,7 @@ async function run() {
           if (debugFileName) {
             console.log(`🐛 [DEBUG] Filtering grid by "${debugFileName}"...`);
             await page.waitForTimeout(2000);
-            await page.click('span.k-i-filter');
+            await page.click('th[data-field="GroupName"] a.k-grid-filter');
             await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
             await page.fill('input[title="Value"].k-textbox', debugFileName);
             await page.click('button[title="Filter"].k-button');
