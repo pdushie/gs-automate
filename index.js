@@ -1215,9 +1215,9 @@ async function uploadFile(page, excelFile) {
 
         // Open the Group Name column filter
         await page.click('th[data-field="GroupName"] a.k-grid-filter');
-        await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
-        await page.fill('input[title="Value"].k-textbox', fileName);
-        await page.click('button[title="Filter"].k-button');
+        await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
+        await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', fileName);
+        await page.click('button[title="Filter"].k-button, .k-filter-menu button[type="submit"]');
         console.log('🔍 Filter applied — waiting for grid to refresh (up to 10 min)...');
         await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
 
@@ -1880,9 +1880,9 @@ async function run() {
             console.log(`🐛 [DEBUG] Filtering grid by "${debugFileName}"...`);
             await page.waitForTimeout(2000);
             await page.click('th[data-field="GroupName"] a.k-grid-filter');
-            await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
-            await page.fill('input[title="Value"].k-textbox', debugFileName);
-            await page.click('button[title="Filter"].k-button');
+            await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
+            await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', debugFileName);
+            await page.click('button[title="Filter"].k-button, .k-filter-menu button[type="submit"]');
             console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (up to 10 min)...');
             await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
             await page.screenshot({ path: 'debug-manage-groups-filtered.png', fullPage: true, timeout: 180000 });
