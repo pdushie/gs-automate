@@ -1221,7 +1221,9 @@ async function uploadFile(page, excelFile) {
         await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', fileName);
         await page.screenshot({ path: 'manage-groups-filter-typed.png', fullPage: true, timeout: 180000 });
         console.log('📸 Screenshot saved — manage-groups-filter-typed.png');
-        await page.click('button[type="submit"][title="Filter"].k-primary');
+        await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
+        await page.screenshot({ path: 'manage-groups-filter-clicked.png', fullPage: true, timeout: 180000 });
+        console.log('📸 Screenshot saved — manage-groups-filter-clicked.png');
         console.log('🔍 Filter applied — waiting for grid to refresh (up to 10 min)...');
         await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
 
@@ -1890,7 +1892,9 @@ async function run() {
             await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', debugFileName);
             await page.screenshot({ path: 'debug-manage-groups-filter-typed.png', fullPage: true, timeout: 180000 });
             console.log('📸 Screenshot saved — debug-manage-groups-filter-typed.png');
-            await page.click('button[type="submit"][title="Filter"].k-primary');
+            await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
+            await page.screenshot({ path: 'debug-manage-groups-filter-clicked.png', fullPage: true, timeout: 180000 });
+            console.log('📸 Screenshot saved — debug-manage-groups-filter-clicked.png');
             console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (up to 10 min)...');
             await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
             await page.screenshot({ path: 'debug-manage-groups-filtered.png', fullPage: true, timeout: 180000 });
