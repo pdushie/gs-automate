@@ -1218,7 +1218,8 @@ async function uploadFile(page, excelFile) {
         await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
         await page.fill('input[title="Value"].k-textbox', fileName);
         await page.click('button[title="Filter"].k-button');
-        await page.waitForTimeout(600000); // wait for grid to refresh (can take up to 10 min)
+        console.log('🔍 Filter applied — waiting for grid to refresh (up to 10 min)...');
+        await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
 
         const groupFound = await page.evaluate((name) => {
           for (const row of document.querySelectorAll('tr.k-master-row')) {
@@ -1882,8 +1883,8 @@ async function run() {
             await page.waitForSelector('input[title="Value"].k-textbox', { timeout: 5000 });
             await page.fill('input[title="Value"].k-textbox', debugFileName);
             await page.click('button[title="Filter"].k-button');
-            console.log('🐛 [DEBUG] Filter applied — waiting up to 10 min for grid to refresh...');
-            await page.waitForTimeout(600000);
+            console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (up to 10 min)...');
+            await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
             await page.screenshot({ path: 'debug-manage-groups-filtered.png', fullPage: true, timeout: 180000 });
             console.log('📸 Screenshot saved — debug-manage-groups-filtered.png');
           }
