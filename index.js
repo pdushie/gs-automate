@@ -1216,14 +1216,8 @@ async function uploadFile(page, excelFile) {
         // Open the Group Name column filter
         await page.click('th[data-field="GroupName"] a.k-grid-filter');
         await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
-        await page.screenshot({ path: 'manage-groups-filter-open.png', fullPage: true, timeout: 180000 });
-        console.log('📸 Screenshot saved — manage-groups-filter-open.png');
         await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', fileName);
-        await page.screenshot({ path: 'manage-groups-filter-typed.png', fullPage: true, timeout: 180000 });
-        console.log('📸 Screenshot saved — manage-groups-filter-typed.png');
         await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
-        await page.screenshot({ path: 'manage-groups-filter-clicked.png', fullPage: true, timeout: 180000 });
-        console.log('📸 Screenshot saved — manage-groups-filter-clicked.png');
         console.log('🔍 Filter applied — waiting for grid to refresh (timeout: 10 min)...');
         await page.waitForLoadState('networkidle', { timeout: 600000 });
 
@@ -1242,19 +1236,15 @@ async function uploadFile(page, excelFile) {
           await manageGroupBtn.waitFor({ state: 'visible', timeout: 30000 });
           await manageGroupBtn.click();
           await page.waitForTimeout(1000);
-          await page.screenshot({ path: 'manage-group-dropdown.png', fullPage: true, timeout: 180000 });
-          console.log('📸 Screenshot saved — manage-group-dropdown.png');
 
           // Wait for the dropdown and click View Beneficiaries
           await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 15000 });
           const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
-          await page.click('a[href*="/beneficiaries/groups/"]');
+          await page.click('a[href*="/beneficiaries/groups/"]', { timeout: 600000 });
           await viewBenefNavPromise;
-          console.log('✅ Beneficiaries page loaded — waiting for Msisdn data to load...');
-          // Wait for the first row to appear in the grid
+          console.log('✅ Beneficiaries page loaded — waiting for first row...');
           await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
-          await page.screenshot({ path: 'view-benef-grid-loaded.png', fullPage: true, timeout: 180000 });
-          console.log('📸 Screenshot saved — view-benef-grid-loaded.png');
+          console.log('✅ Data grid loaded');
 
           // Click Share
           await page.waitForSelector('#uploadList', { timeout: 10000 });
@@ -1916,9 +1906,9 @@ async function run() {
           console.log('📸 Screenshot saved — debug-view-benef-before-click.png');
 
           const debugBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
-          await page.click('a[href*="/beneficiaries/groups/"]');
+          await page.click('a[href*="/beneficiaries/groups/"]', { timeout: 600000 });
           await debugBenefNavPromise;
-          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — waiting for Msisdn data to load...');
+          console.log('🐛 [DEBUG] View Beneficiaries page loaded ✅ — waiting for first row...');
           // Wait for the first row to appear in the grid
           await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
