@@ -1216,7 +1216,11 @@ async function uploadFile(page, excelFile) {
         // Open the Group Name column filter
         await page.click('th[data-field="GroupName"] a.k-grid-filter');
         await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
+        await page.screenshot({ path: 'manage-groups-filter-open.png', fullPage: true, timeout: 180000 });
+        console.log('📸 Screenshot saved — manage-groups-filter-open.png');
         await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', fileName);
+        await page.screenshot({ path: 'manage-groups-filter-typed.png', fullPage: true, timeout: 180000 });
+        console.log('📸 Screenshot saved — manage-groups-filter-typed.png');
         await page.click('button[title="Filter"].k-button, .k-filter-menu button[type="submit"]');
         console.log('🔍 Filter applied — waiting for grid to refresh (up to 10 min)...');
         await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
@@ -1881,7 +1885,11 @@ async function run() {
             await page.waitForTimeout(2000);
             await page.click('th[data-field="GroupName"] a.k-grid-filter');
             await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
+            await page.screenshot({ path: 'debug-manage-groups-filter-open.png', fullPage: true, timeout: 180000 });
+            console.log('📸 Screenshot saved — debug-manage-groups-filter-open.png');
             await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', debugFileName);
+            await page.screenshot({ path: 'debug-manage-groups-filter-typed.png', fullPage: true, timeout: 180000 });
+            console.log('📸 Screenshot saved — debug-manage-groups-filter-typed.png');
             await page.click('button[title="Filter"].k-button, .k-filter-menu button[type="submit"]');
             console.log('🐛 [DEBUG] Filter applied — waiting for grid to refresh (up to 10 min)...');
             await page.waitForSelector('tr.k-master-row', { timeout: 600000 });
