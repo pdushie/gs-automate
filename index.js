@@ -554,7 +554,7 @@ async function purchaseData(page, context) {
   await page.waitForFunction(() => {
     const rows = document.querySelectorAll('tbody[data-template="cost-details-item-template"] tr');
     return Array.from(rows).some(r => r.innerText.includes('TB'));
-  }, { timeout: 15000 });
+  }, null, { timeout: 15000 });
 
   const tableText = await page.$eval('tbody[data-template="cost-details-item-template"]', el => el.innerText);
   console.log(`📋 Cost details:\n${tableText}`);
@@ -1082,7 +1082,12 @@ async function uploadFile(page, excelFile) {
     console.log('✅ Upload clicked');
 
     await beneficiariesNavPromise;
-    console.log('✅ Beneficiaries page loaded');
+    console.log('✅ Beneficiaries page loaded — waiting for Msisdn data to load...');
+    await page.waitForFunction(() => {
+      const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
+      return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
+    }, null, { timeout: 900000 });
+    console.log('✅ Data grid loaded');
 
     await page.waitForSelector('#uploadList', { timeout: 240000 });
     await page.click('#uploadList');
@@ -1246,7 +1251,7 @@ async function uploadFile(page, excelFile) {
           await page.waitForFunction(() => {
             const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
             return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
-          }, { timeout: 900000 });
+          }, null, { timeout: 900000 });
           await page.screenshot({ path: 'view-benef-grid-loaded.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — view-benef-grid-loaded.png');
 
@@ -1911,7 +1916,7 @@ async function run() {
           await page.waitForFunction(() => {
             const rows = document.querySelectorAll('table.k-grid-table tbody tr td:first-child, .k-grid tbody tr td:first-child');
             return rows.length > 0 && [...rows].some(td => td.textContent.trim().length > 0);
-          }, { timeout: 900000 });
+          }, null, { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-loaded.png');
 
