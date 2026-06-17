@@ -1241,7 +1241,10 @@ async function uploadFile(page, excelFile) {
           const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
           await page.click('a[href*="/beneficiaries/groups/"]');
           await viewBenefNavPromise;
-          console.log('✅ Beneficiaries page loaded');
+          console.log('✅ Beneficiaries page loaded — waiting for data grid...');
+          await page.waitForSelector('table.k-grid-table, .k-grid tbody tr, #uploadList', { timeout: 900000 });
+          await page.screenshot({ path: 'view-benef-grid-loaded.png', fullPage: true, timeout: 180000 });
+          console.log('📸 Screenshot saved — view-benef-grid-loaded.png');
 
           // Click Share
           await page.waitForSelector('#uploadList', { timeout: 10000 });
@@ -1899,7 +1902,8 @@ async function run() {
           const debugBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
           await page.click('a[href*="/beneficiaries/groups/"]');
           await debugBenefNavPromise;
-          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — saving screenshot...');
+          console.log('🐛 [DEBUG] View Beneficiaries page loaded successfully ✅ — waiting for data grid...');
+          await page.waitForSelector('table.k-grid-table, .k-grid tbody tr, #uploadList', { timeout: 900000 });
           await page.screenshot({ path: 'debug-view-benef-loaded.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-view-benef-loaded.png');
 
