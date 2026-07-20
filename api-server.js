@@ -224,10 +224,7 @@ if (uploadFolder && !fs.existsSync(uploadFolder)) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, process.env.EXCEL_FOLDER_PATH),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const base = path.basename(file.originalname, ext);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    cb(null, `${base}-${timestamp}${ext}`);
+    cb(null, file.originalname);
   }
 });
 
@@ -673,7 +670,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       return res.json({
         success: true,
         message: 'Zip archive extracted and queued for processing',
-        filename: path.basename(storedZipPath),
+        filename: req.file.originalname,
         folder: path.basename(zipFolder),
         queuedAt,
         extractedFiles: extractedFiles.map(f => f.name),
@@ -753,9 +750,7 @@ app.post('/upload-base64', async (req, res) => {
       console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
     }
 
-    const base = path.basename(filename, ext);
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const savedName = `${base}-${timestamp}${ext}`;
+    const savedName = filename;
     const savePath = path.join(process.env.EXCEL_FOLDER_PATH, savedName);
     const queuedAt = new Date().toISOString();
 
@@ -788,7 +783,7 @@ app.post('/upload-base64', async (req, res) => {
       return res.json({
         success: true,
         message: 'Zip archive extracted and queued for processing',
-        filename: path.basename(storedZipPath),
+        filename: filename,
         folder: path.basename(zipFolder),
         queuedAt,
         extractedFiles: extractedFiles.map(f => f.name),
