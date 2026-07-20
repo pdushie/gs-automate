@@ -64,6 +64,53 @@ const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json
 const MAX_FILE_RETRIES = parseInt(process.env.MAX_FILE_RETRIES || '5');
 const MAX_SPLIT_B_CYCLES = parseInt(process.env.MAX_SPLIT_B_CYCLES || '3');
 
+function normalizeRelativePath(filePath, basePath) {
+  return path.relative(path.resolve(basePath), path.resolve(filePath)).split(path.sep).join('/');
+}
+
+function isSpreadsheetFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const base = path.basename(filePath);
+  return (ext === '.xlsx' || ext === '.xls') && !base.startsWith('NM-merged-');
+}
+
+function listSpreadsheetFiles(folderPath) {
+  const results = [];
+
+  function visit(dirPath) {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (!isSpreadsheetFile(fullPath)) continue;
+      results.push({
+        name: normalizeRelativePath(fullPath, folderPath),
+        fullPath,
+        mtime: fs.statSync(fullPath).mtime,
+      });
+    }
+  }
+
+  visit(folderPath);
+  return results;
+}
+
+function getFileKey(filePath) {
+  const folderPath = process.env.EXCEL_FOLDER_PATH;
+  const resolvedFile = path.resolve(filePath);
+  if (folderPath) {
+    const resolvedFolder = path.resolve(folderPath);
+    if (resolvedFile === resolvedFolder || resolvedFile.startsWith(resolvedFolder + path.sep)) {
+      return normalizeRelativePath(resolvedFile, resolvedFolder);
+    }
+  }
+  return path.basename(filePath);
+}
+
 function loadStatusLog() {
   try {
     if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
@@ -284,22 +331,15 @@ function getPendingFiles(folderPath) {
     }
   }
 
-  const files = fs.readdirSync(folderPath)
+  const files = listSpreadsheetFiles(folderPath)
     .filter(f => {
-      if (!f.endsWith('.xlsx') && !f.endsWith('.xls')) return false;
-      if (f.startsWith('NM-merged-')) return false; // temp merged files — never process as source
-      if (uploaded.includes(f)) return false;
-      if (statusLog[f] === 'ABANDONED') return false;
-      if (statusLog[f] === 'SPLIT') return false; // original file already split into parts — parts are pending
-      if (statusLog[f] === 'STUCK') return false; // Part B exhausted all retry cycles — awaiting human intervention
-      if (lockedSourceFiles.has(f)) return false; // owned by an active batch — do not re-queue
+      if (uploaded.includes(f.name)) return false;
+      if (statusLog[f.name] === 'ABANDONED') return false;
+      if (statusLog[f.name] === 'SPLIT') return false; // original file already split into parts — parts are pending
+      if (statusLog[f.name] === 'STUCK') return false; // Part B exhausted all retry cycles — awaiting human intervention
+      if (lockedSourceFiles.has(f.name)) return false; // owned by an active batch — do not re-queue
       return true;
     })
-    .map(f => ({
-      name: f,
-      fullPath: path.join(folderPath, f),
-      mtime: fs.statSync(path.join(folderPath, f)).mtime,
-    }))
     .sort((a, b) => a.mtime - b.mtime);
 
   return files;
@@ -734,7 +774,7 @@ function _parseExcelTotalMB(filePath) {
 // otherwise parses the XLSX and caches the result for next time.
 function getExcelTotalMB(file) {
   const filePath = file.fullPath || file;
-  const fileName = path.basename(filePath);
+  const fileName = file.name || getFileKey(filePath);
   const mtime = (file.mtime || fs.statSync(filePath).mtime).toISOString();
 
   const log = loadStatusLog();
@@ -1017,11 +1057,37 @@ function splitFileToFitBalance(file, availableMB) {
   };
 }
 
+// Parse the data allocation from a stripped filename.
+// Supports patterns like "NM-25GB_...", "NM-1024MB_...", "NM-1.5TB_...".
+function parseAllocationFromFilename(strippedBase) {
+  const m = strippedBase.match(/(\d+(?:\.\d+)?)\s*(MB|GB|TB)/i);
+  return m ? { value: m[1], unit: m[2].toUpperCase() } : null;
+}
+
 async function uploadFile(page, excelFile) {
-  const fileName = path.basename(excelFile.name, path.extname(excelFile.name));
+  const fullBaseName  = path.basename(excelFile.name, path.extname(excelFile.name));
+  const strippedBase  = path.basename(stripTimestamp(excelFile.name), path.extname(excelFile.name));
+  const groupName     = strippedBase; // group name = original filename without extension
+  const allocation    = parseAllocationFromFilename(strippedBase);
+
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📦 Uploading: ${excelFile.name}`);
+  console.log(`   Group name  : ${groupName}`);
+  console.log(`   Data volume : ${allocation ? `${allocation.value} ${allocation.unit}` : '⚠️  not found in filename'}`);
   console.log(`${'='.repeat(60)}`);
+
+  if (!allocation) {
+    const errMsg = `Cannot upload "${excelFile.name}" — data allocation could not be parsed from the filename. ` +
+      `Rename the file to include the allocation, e.g. NM-25GB_... or NM-1024MB_...`;
+    console.error(`❌ ${errMsg}`);
+    sendAlert('❌ MTN GroupShare — Missing Allocation', errMsg);
+    updateStatusLog({
+      [excelFile.name]: 'ABANDONED',
+      [`${excelFile.name}_timedOutAt`]: new Date().toISOString(),
+      [`${excelFile.name}_note`]: errMsg,
+    });
+    return { error: true };
+  }
 
   if (excelFile.isMerged) {
     withFileLock(STATUS_LOG, () => {
@@ -1039,241 +1105,91 @@ async function uploadFile(page, excelFile) {
     });
   }
 
-  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-beneficiaries', { waitUntil: 'networkidle' });
+  // ── Navigate to Manage Groups ─────────────────────────────────────────────
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle' });
+  _lastPortalNavAt = Date.now();
 
-  // Check if a previous upload is still processing — MTN blocks new uploads in this case
-  const isBlocked = await page.evaluate(() => {
-    const spans = Array.from(document.querySelectorAll('span[uk-icon*="ban"], span.uk-icon'));
-    if (spans.some(el => el.getAttribute('uk-icon') && el.getAttribute('uk-icon').includes('ban'))) return true;
-    const allText = document.body.innerText || '';
-    return allText.includes('You cannot upload file until the last upload is done processing');
-  });
-
-  if (isBlocked) {
-    console.warn('⏳ Upload blocked: a previous upload is still processing on MTN\'s end. Will retry later.');
-    if (excelFile.isMerged) {
-      withFileLock(STATUS_LOG, () => {
-        const l = loadStatusLog();
-        const rec = l[excelFile.name] || {};
-        rec.status = 'PENDING';
-        l[excelFile.name] = rec;
-        atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-      });
-      // Delete temp merged file — source files stay pending and will be re-merged next cycle
-      try { fs.unlinkSync(excelFile.fullPath); } catch {}
-    } else {
-      updateStatusLog({ [excelFile.name]: 'PENDING' });
+  // ── Recovery: check if group already exists from a prior failed attempt ────
+  let groupCreatedSuccessfully = false;
+  try {
+    const alreadyExists = await page.evaluate((name) => {
+      for (const row of document.querySelectorAll('tr.k-master-row, tbody tr')) {
+        if (row.textContent.includes(name)) return true;
+      }
+      return false;
+    }, groupName);
+    if (alreadyExists) {
+      console.log(`ℹ️  Group "${groupName}" already exists on Manage Groups — treating as DONE (recovery)`);
+      groupCreatedSuccessfully = true;
     }
-    return { blocked: true };
+  } catch (checkErr) {
+    console.warn(`⚠️  Pre-flight group existence check failed: ${checkErr.message}`);
   }
 
-  await page.waitForSelector('input[name="files"]', { timeout: 10000 });
-  await page.setInputFiles('input[name="files"]', excelFile.fullPath);
-  console.log('✅ File selected');
-
-  await page.waitForSelector('#groupId', { timeout: 10000 });
-  await page.fill('#groupId', fileName);
-  console.log(`✅ Group name: ${fileName}`);
-
-  try {
-    await page.waitForSelector('button.k-upload-selected', { timeout: 10000 });
-    const beneficiariesNavPromise = page.waitForURL('**/beneficiaries**', { timeout: 900000 });
-    await page.click('button.k-upload-selected');
-    console.log('✅ Upload clicked');
-
-    await beneficiariesNavPromise;
-    console.log('✅ Beneficiaries page loaded — waiting for Msisdn data to load...');
-    await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
-    console.log('✅ Data grid loaded');
-
-    await page.waitForSelector('#uploadList', { timeout: 240000 });
-    await page.click('#uploadList');
-    console.log('✅ Share clicked');
-
-    await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 240000 });
-    await page.waitForTimeout(500);
-    const statusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 240000 });
-    await page.click('.uk-button-primary:has-text("Ok")');
-    console.log('✅ Confirmation accepted');
-
-    await statusNavPromise;
-    console.log('✅ Status page loaded — polling for DONE...');
-    if (!excelFile.isMerged) {
-      updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
-    }
-  } catch (navErr) {
-    console.error(`❌ Navigation failed during upload of "${excelFile.name}": ${navErr.message}`);
-    try { await page.screenshot({ path: `nav-error-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
-
-    // Check if we're still on the upload page — indicates the portal rejected the upload
-    const currentUrl = page.url();
-    if (currentUrl.includes('upload-beneficiaries')) {
-      // Read whatever error text the portal is showing
-      const portalError = await page.evaluate(() => {
-        const el = document.querySelector('.k-notification-error, .uk-alert-danger, [class*="error"], [class*="alert"]');
-        return el ? el.innerText.trim() : document.body.innerText.trim().substring(0, 300);
-      });
-      console.warn(`⚠️ Portal is still on upload page. Page message: ${portalError}`);
-
-      // Only mark as DONE if the portal error clearly indicates the group already exists.
-      // Any other error is treated as a retryable failure — do NOT mark done prematurely.
-      const isDuplicateGroup = /already exists|duplicate|group name.*taken|already been (uploaded|shared)/i.test(portalError);
-      if (isDuplicateGroup) {
-        const completedAt = new Date().toISOString();
-        if (excelFile.isMerged) {
-          withFileLock(STATUS_LOG, () => {
-            const l = loadStatusLog();
-            const rec = l[excelFile.name] || {};
-            const queuedMs = rec.queuedAt ? new Date(rec.queuedAt).getTime() : null;
-            rec.status = 'DONE';
-            rec.completedAt = completedAt;
-            rec.note = `Marked done — duplicate group name. Portal: ${portalError}`;
-            if (queuedMs) rec.processingDurationMs = Date.now() - queuedMs;
-            l[excelFile.name] = rec;
-            atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-          });
-          const dupSrcFiles = (loadStatusLog()[excelFile.name]?.sourceFiles || []);
-          for (let si = 0; si < dupSrcFiles.length; si++) {
-            const src = dupSrcFiles[si];
-            if (src.callbackSentAt) {
-              console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping (duplicate group path)`);
-            } else {
-              await sendCallback(src.filename, 'DONE', completedAt, src);
-              withFileLock(STATUS_LOG, () => {
-                const l = loadStatusLog();
-                const rec = l[excelFile.name] || {};
-                if (rec.sourceFiles && rec.sourceFiles[si]) {
-                  rec.sourceFiles[si].callbackSentAt = new Date().toISOString();
-                }
-                l[excelFile.name] = rec;
-                atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-              });
-            }
-            updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
-            markAsUploaded(src.filename);
-          }
-          try { fs.unlinkSync(excelFile.fullPath); } catch {}
-          markAsUploaded(excelFile.name);
-        } else {
-          markAsUploaded(excelFile.name);
-          const dupQueuedAt = loadStatusLog()[`${excelFile.name}_queuedAt`];
-          const dupDurationMs = dupQueuedAt ? Date.now() - new Date(dupQueuedAt).getTime() : null;
-          updateStatusLog({
-            [excelFile.name]: 'DONE',
-            [`${excelFile.name}_completedAt`]: completedAt,
-            [`${excelFile.name}_note`]: `Marked done — portal rejected upload (duplicate group name). Portal message: ${portalError}`,
-            ...(dupDurationMs != null ? { [`${excelFile.name}_processingDurationMs`]: dupDurationMs } : {}),
-          });
-          await sendCallback(excelFile.name, 'DONE', completedAt);
-        }
-        console.log(`✅ ${excelFile.name} — marked as DONE (duplicate group name confirmed)`);
-        return true;
-      }
-
-      // Unknown portal error — treat as a retryable nav failure
-      console.warn(`⚠️ Unknown portal error — treating as nav failure for retry.`);
-      sendAlert('⚠️ MTN GroupShare — Upload Portal Error', `"${excelFile.name}" received an unexpected portal error: ${portalError}`);
-    }
-
-    // Recovery: before marking TIMEOUT, navigate to upload-status and check whether
-    // the file already landed there. The upload button may have been clicked and the
-    // file submitted to MTN, but the browser lost the redirect. If the file is already
-    // on the status page, skip the TIMEOUT and fall through to the normal polling loop.
-    console.log(`🔍 Nav failed — checking upload-status page for "${fileName}" before marking timeout...`);
-    let recoveredToStatusPage = false;
+  if (!groupCreatedSuccessfully) {
     try {
-      await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle', timeout: 20000 });
-      await page.waitForTimeout(3000); // allow table to render
-      const statusOnPage = await page.evaluate((name) => {
-        const rows = document.querySelectorAll('tr.k-master-row');
-        for (const row of rows) {
-          const cells = row.querySelectorAll('td');
-          if (cells[1] && cells[1].textContent.trim() === name) {
-            return cells[4] ? cells[4].textContent.trim() : 'FOUND';
-          }
-        }
-        return null;
-      }, fileName);
-      if (statusOnPage) {
-        console.log(`✅ "${fileName}" found on upload-status (${statusOnPage}) after nav failure — resuming polling instead of marking TIMEOUT`);
-        recoveredToStatusPage = true;
+      // ── 1. Open Create Group modal ───────────────────────────────────────
+      await page.waitForSelector('button[onclick*="OpenCreateGroupModal"]', { timeout: 15000 });
+      await page.click('button[onclick*="OpenCreateGroupModal"]');
+      await page.waitForSelector('#create-group-name', { timeout: 15000 });
+      console.log('✅ Create Group modal opened');
+
+      // ── 2. Group Name ────────────────────────────────────────────────────
+      await page.fill('#create-group-name', groupName);
+      console.log(`✅ Group name: ${groupName}`);
+
+      // ── 3. Data Volume + Unit ────────────────────────────────────────────
+      await page.fill('#create-group-data', allocation.value);
+      await page.selectOption('#create-group-data-unit', allocation.unit);
+      console.log(`✅ Data volume: ${allocation.value} ${allocation.unit}`);
+
+      // ── 4. Switch to Upload Beneficiaries tab ────────────────────────────
+      await page.click('a[data-mode="upload"]');
+      console.log('✅ Upload Beneficiaries tab selected');
+
+      // ── 5. Attach Excel file ─────────────────────────────────────────────
+      await page.waitForSelector('#group-beneficiaries-file', { timeout: 10000 });
+      await page.setInputFiles('#group-beneficiaries-file', excelFile.fullPath);
+      console.log('✅ File attached');
+
+      // ── 6. Submit ────────────────────────────────────────────────────────
+      await page.waitForSelector('button.submit-btn', { timeout: 10000 });
+      await page.click('button.submit-btn');
+      console.log('✅ Create Group submitted — waiting for response...');
+
+      // ── 7. Detect success or failure notification ────────────────────────
+      const outcome = await Promise.race([
+        page.waitForSelector(
+          '.uk-notification-message-success, .uk-notification-message[class*="success"]',
+          { timeout: 120000 }
+        ).then(() => 'success'),
+        page.waitForSelector(
+          '.uk-notification-message-danger, .uk-notification-message[class*="danger"], .uk-alert-danger',
+          { timeout: 120000 }
+        ).then(async (el) => {
+          const msg = await el.evaluate(e => e.textContent.trim()).catch(() => '');
+          return { type: 'error', msg };
+        }),
+      ]);
+
+      if (outcome === 'success') {
+        console.log('✅ Portal confirmed group created');
+        groupCreatedSuccessfully = true;
       } else {
-        console.log(`ℹ️  "${fileName}" not found on upload-status — treating as genuine nav failure`);
-      }
-    } catch (recoveryErr) {
-      console.warn(`⚠️  Recovery nav to upload-status failed: ${recoveryErr.message}`);
-    }
-
-    // Recovery step 2: check Manage Beneficiaries Groups for a group already created by
-    // this upload. The group name matches `fileName` (file name without extension).
-    // If found, complete the share flow — View Beneficiaries → Share → OK → poll DONE.
-    if (!recoveredToStatusPage) {
-      console.log(`🔍 Checking Manage Groups page for group "${fileName}"...`);
-      try {
-        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
-        await page.waitForTimeout(2000);
-
-        // Open the Group Name column filter
-        await page.click('th[data-field="GroupName"] a.k-grid-filter');
-        await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
-        await page.fill('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', fileName);
-        await page.press('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', 'Enter');
-        console.log('🔍 Filter applied — waiting for grid to refresh (timeout: 10 min)...');
-        await page.waitForLoadState('networkidle', { timeout: 600000 });
-
-        const groupFound = await page.evaluate((name) => {
-          for (const row of document.querySelectorAll('tr.k-master-row')) {
-            if (row.textContent.includes(name)) return true;
-          }
-          return false;
-        }, fileName);
-
-        if (groupFound) {
-          console.log(`✅ Group "${fileName}" found on manage-groups — completing share flow...`);
-
-          // Click the Manage group dropdown button in the matching row
-          const manageGroupBtn = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
-          await manageGroupBtn.waitFor({ state: 'visible', timeout: 30000 });
-          await manageGroupBtn.click();
-          await page.waitForTimeout(1000);
-
-          // Wait for the dropdown and click View Beneficiaries
-          await page.waitForSelector('a[href*="/beneficiaries/groups/"]', { timeout: 15000 });
-          const viewBenefNavPromise = page.waitForURL('**/beneficiaries/groups/**', { timeout: 900000 });
-          await page.click('a[href*="/beneficiaries/groups/"]', { timeout: 600000 });
-          await viewBenefNavPromise;
-          console.log('✅ Beneficiaries page loaded — waiting for first row...');
-          await page.waitForSelector('table.k-grid-table tbody tr, .k-grid tbody tr', { timeout: 900000 });
-          console.log('✅ Data grid loaded');
-
-          // Click Share
-          await page.waitForSelector('#uploadList', { timeout: 10000 });
-          await page.click('#uploadList');
-          console.log('✅ Share clicked');
-
-          // Confirm OK and wait for upload-status
-          await page.waitForSelector('.uk-button-primary:has-text("Ok")', { timeout: 30000 });
-          await page.waitForTimeout(500);
-          const mgStatusNavPromise = page.waitForURL('**/upload/upload-status', { timeout: 240000 });
-          await page.click('.uk-button-primary:has-text("Ok")');
-          console.log('✅ Confirmation accepted');
-          await mgStatusNavPromise;
-          console.log('✅ Recovered via manage-groups — on upload-status, polling for DONE...');
-
-          if (!excelFile.isMerged) {
-            updateStatusLog({ [`${excelFile.name}_queuedAt`]: new Date().toISOString() });
-          }
-          recoveredToStatusPage = true;
+        const errMsg = typeof outcome === 'object' ? outcome.msg : '';
+        const isDuplicate = /already exists|duplicate|group name.*taken/i.test(errMsg);
+        if (isDuplicate) {
+          console.log(`ℹ️  Duplicate group name confirmed by portal — treating as DONE`);
+          groupCreatedSuccessfully = true;
         } else {
-          console.log(`ℹ️  Group "${fileName}" not found on manage-groups — treating as genuine nav failure`);
+          throw new Error(`Portal error after submit: ${errMsg}`);
         }
-      } catch (manageGroupsErr) {
-        console.warn(`⚠️  Manage-groups recovery failed: ${manageGroupsErr.message}`);
       }
-    }
+    } catch (navErr) {
+      console.error(`❌ Create Group failed for "${excelFile.name}": ${navErr.message}`);
+      try { await page.screenshot({ path: `nav-error-${fullBaseName}.png`, timeout: 5000 }); } catch {}
 
-    if (!recoveredToStatusPage) {
-      // Genuine navigation failure — apply retry / abandon logic
+      // ── Retry / abandon logic ────────────────────────────────────────────
       const currentStatus = loadStatusLog();
       const existingNavRetry = excelFile.isMerged
         ? (currentStatus[excelFile.name]?.retryCount || 0)
@@ -1286,15 +1202,13 @@ async function uploadFile(page, excelFile) {
           withFileLock(STATUS_LOG, () => {
             const l = loadStatusLog();
             const rec = l[excelFile.name] || {};
-            rec.status = 'ABANDONED';
-            rec.timedOutAt = timedOutAt;
-            rec.retryCount = retryCount;
+            rec.status = 'ABANDONED'; rec.timedOutAt = timedOutAt; rec.retryCount = retryCount;
             l[excelFile.name] = rec;
             atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
           });
           try { fs.unlinkSync(excelFile.fullPath); } catch {}
           const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
-          sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" failed navigation ${retryCount} times. Source files re-queued: ${srcNames}`);
+          sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" failed ${retryCount} times. Source files re-queued: ${srcNames}`);
         } else {
           updateStatusLog({
             [excelFile.name]: 'ABANDONED',
@@ -1303,360 +1217,117 @@ async function uploadFile(page, excelFile) {
           });
           const navAbandonLog = loadStatusLog();
           if (navAbandonLog[`${excelFile.name}_isSplitIntermediate`]) {
-            // Part A abandoned — cascade abandon Part B so the order doesn't remain half-done
             const partBName = navAbandonLog[`${excelFile.name}_partnerPart`];
             if (partBName) {
               updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: timedOutAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was abandoned` });
               try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
-              sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) failed navigation ${retryCount} times.\nPart B "${partBName}" also abandoned. Sending ABANDONED callback.`);
+              sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) abandoned after ${retryCount} failures.\nPart B "${partBName}" also abandoned.`);
               await sendCallback(partBName, 'ABANDONED', timedOutAt);
             } else {
-              sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+              sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed ${retryCount} times and has been abandoned.`);
               await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
             }
           } else if (navAbandonLog[`${excelFile.name}_isSplitFinal`]) {
-            // Part B nav-abandoned — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
             const originalFile = navAbandonLog[`${excelFile.name}_originalFile`] || excelFile.name;
             const splitAttempt = (navAbandonLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
             if (splitAttempt < MAX_SPLIT_B_CYCLES) {
-              updateStatusLog({
-                [excelFile.name]: null,
-                [`${excelFile.name}_timedOutAt`]: null,
-                [`${excelFile.name}_retryCount`]: 0,
-                [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-              });
-              sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") failed navigation ${retryCount} times (cycle ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
+              updateStatusLog({ [excelFile.name]: null, [`${excelFile.name}_timedOutAt`]: null, [`${excelFile.name}_retryCount`]: 0, [`${excelFile.name}_splitFinalAttempt`]: splitAttempt });
+              sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") failed (cycle ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing.`);
             } else {
-              updateStatusLog({
-                [excelFile.name]: 'STUCK',
-                [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-              });
-              sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") has exhausted ${MAX_SPLIT_B_CYCLES} upload cycles. Please process manually.`);
+              updateStatusLog({ [excelFile.name]: 'STUCK', [`${excelFile.name}_splitFinalAttempt`]: splitAttempt });
+              sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") exhausted ${MAX_SPLIT_B_CYCLES} cycles. Please process manually.`);
             }
           } else {
-            sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed navigation ${retryCount} times and has been abandoned.`);
+            sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed ${retryCount} times and has been abandoned.`);
             await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
           }
         }
-        console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} nav failure(s)`);
+        console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} failure(s)`);
+        try { await page.screenshot({ path: `abandoned-${fullBaseName}.png`, timeout: 5000 }); } catch {}
       } else {
         if (excelFile.isMerged) {
           withFileLock(STATUS_LOG, () => {
             const l = loadStatusLog();
             const rec = l[excelFile.name] || {};
-            rec.status = 'TIMEOUT';
-            rec.timedOutAt = timedOutAt;
-            rec.retryCount = retryCount;
+            rec.status = 'TIMEOUT'; rec.timedOutAt = timedOutAt; rec.retryCount = retryCount;
             l[excelFile.name] = rec;
             atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
           });
           try { fs.unlinkSync(excelFile.fullPath); } catch {}
-          sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-queued for retry.`);
+          sendAlert('⚠️ MTN GroupShare — Merged Batch Nav Failed', `Batch "${excelFile.name}" failed to create (attempt ${retryCount}/${MAX_FILE_RETRIES}). Source files will be re-queued.`);
         } else {
           updateStatusLog({
             [excelFile.name]: 'TIMEOUT',
             [`${excelFile.name}_timedOutAt`]: timedOutAt,
             [`${excelFile.name}_retryCount`]: retryCount,
           });
-          sendAlert('⚠️ MTN GroupShare — Upload Navigation Failed', `"${excelFile.name}" failed to navigate (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
+          sendAlert('⚠️ MTN GroupShare — Upload Failed', `"${excelFile.name}" failed (attempt ${retryCount}/${MAX_FILE_RETRIES}). Will retry.`);
         }
-        console.warn(`⚠️ ${excelFile.name} — nav failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), TIMEOUT — manual resolution required`);
+        console.warn(`⚠️ ${excelFile.name} — failure (attempt ${retryCount}/${MAX_FILE_RETRIES}), TIMEOUT`);
+        try { await page.screenshot({ path: `timeout-${fullBaseName}.png`, timeout: 5000 }); } catch {}
       }
       return { error: true };
     }
-    // recoveredToStatusPage === true: fall through to PROCESSING + polling below.
-    // Page is already on upload-status; the poll loop reload will pick it up immediately.
   }
+
+  // ── Mark DONE ─────────────────────────────────────────────────────────────
+  const completedAt = new Date().toISOString();
 
   if (excelFile.isMerged) {
     withFileLock(STATUS_LOG, () => {
       const l = loadStatusLog();
       const rec = l[excelFile.name] || {};
-      rec.status = 'PROCESSING';
-      rec.queuedAt = new Date().toISOString();
+      const queuedMs = rec.queuedAt ? new Date(rec.queuedAt).getTime() : null;
+      rec.status = 'DONE';
+      rec.completedAt = completedAt;
+      if (queuedMs) rec.processingDurationMs = Date.now() - queuedMs;
       l[excelFile.name] = rec;
       atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
     });
+
+    const batchRecord = loadStatusLog()[excelFile.name] || {};
+    const sourceFiles = batchRecord.sourceFiles || [];
+    for (let si = 0; si < sourceFiles.length; si++) {
+      const src = sourceFiles[si];
+      if (src.callbackSentAt) {
+        console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping`);
+      } else {
+        await sendCallback(src.filename, 'DONE', completedAt, src);
+        withFileLock(STATUS_LOG, () => {
+          const l = loadStatusLog();
+          const rec = l[excelFile.name] || {};
+          if (rec.sourceFiles && rec.sourceFiles[si]) rec.sourceFiles[si].callbackSentAt = new Date().toISOString();
+          l[excelFile.name] = rec;
+          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
+        });
+      }
+      updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
+      markAsUploaded(src.filename);
+    }
+    try { fs.unlinkSync(excelFile.fullPath); } catch {}
+    markAsUploaded(excelFile.name);
   } else {
-    updateStatusLog({ [excelFile.name]: 'PROCESSING' });
-  }
-
-  const maxAttempts = 180;
-  const pollInterval = 15000;
-  let isDone = false;
-  let isFailed = false;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    let status = null;
-    try {
-      await reloadWithRetry(page, { waitUntil: 'networkidle' });
-
-      if (page.url().includes('/account/login')) {
-        console.warn('🔒 Session expired during polling — re-logging in...');
-        sendAlert('🔒 MTN GroupShare — Session Expired', 'Session expired during upload polling. Re-logging in...');
-        await login(page);
-        await gotoWithRetry(page, 'https://up2u.mtn.com.gh/upload/upload-status', { waitUntil: 'networkidle' });
-      }
-
-      status = await page.evaluate((name) => {
-        const rows = document.querySelectorAll('tr.k-master-row');
-        for (const row of rows) {
-          const cells = row.querySelectorAll('td');
-          if (cells[1] && cells[1].textContent.trim() === name) {
-            return cells[4] ? cells[4].textContent.trim() : null;
-          }
-        }
-        return null;
-      }, fileName);
-    } catch (pollErr) {
-      // Transient network/page error during a poll attempt — log and continue.
-      // The post-loop TIMEOUT path will handle it if all attempts are exhausted.
-      console.warn(`⚠️  Poll attempt ${attempt}/${maxAttempts} error for "${fileName}": ${pollErr.message}`);
-      if (attempt < maxAttempts) {
-        await new Promise(r => setTimeout(r, pollInterval));
-        continue;
-      }
-      // Last attempt failed with an error — fall through to post-loop TIMEOUT
-      break;
-    }
-
-    console.log(`🔄 [${new Date().toLocaleTimeString()}] Attempt ${attempt}/${maxAttempts} — ${fileName}: ${status ?? 'not found'}`);
-
-    if (status === 'DONE') {
-      isDone = true;
-      const completedAt = new Date().toISOString();
-
-      if (excelFile.isMerged) {
-        // ── Merged batch: callback each source file individually ──────────
-        const log = loadStatusLog();
-        const batchRecord = log[excelFile.name] || {};
-        const sourceFiles = batchRecord.sourceFiles || [];
-
-        // Update merged batch record status
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          const queuedMs = rec.queuedAt ? new Date(rec.queuedAt).getTime() : null;
-          rec.status = 'DONE';
-          rec.completedAt = completedAt;
-          if (queuedMs) rec.processingDurationMs = Date.now() - queuedMs;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-
-        for (let si = 0; si < sourceFiles.length; si++) {
-          const src = sourceFiles[si];
-          if (src.callbackSentAt) {
-            console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping`);
-          } else {
-            await sendCallback(src.filename, 'DONE', completedAt, src);
-            // Mark callbackSentAt in the merged batch record
-            withFileLock(STATUS_LOG, () => {
-              const l = loadStatusLog();
-              const rec = l[excelFile.name] || {};
-              if (rec.sourceFiles && rec.sourceFiles[si]) {
-                rec.sourceFiles[si].callbackSentAt = new Date().toISOString();
-              }
-              l[excelFile.name] = rec;
-              atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-            });
-          }
-          // Write flat _completedAt so resolveFileStatus and cleanupOldFiles
-          // can find the timestamp via the standard key without scanning batch records
-          updateStatusLog({ [`${src.filename}_completedAt`]: completedAt });
-          markAsUploaded(src.filename);
-        }
-
-        // Delete the temp merged file
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        markAsUploaded(excelFile.name);
-      } else {
-        // ── Single file / split part ──────────────────────────────────────
-        markAsUploaded(excelFile.name);
-        const singleQueuedAt = loadStatusLog()[`${excelFile.name}_queuedAt`];
-        const singleDurationMs = singleQueuedAt ? Date.now() - new Date(singleQueuedAt).getTime() : null;
-        updateStatusLog({
-          [excelFile.name]: 'DONE',
-          [`${excelFile.name}_completedAt`]: completedAt,
-          ...(singleDurationMs != null ? { [`${excelFile.name}_processingDurationMs`]: singleDurationMs } : {}),
-        });
-
-        const splitLog = loadStatusLog();
-        if (splitLog[`${excelFile.name}_isSplitIntermediate`]) {
-          // Part A — no callback; order is not complete until Part B uploads
-          console.log(`✂️  Split Part A "${excelFile.name}" DONE — holding callback until Part B ("${splitLog[`${excelFile.name}_partnerPart`]}") completes`);
-          // Wake the main loop immediately so Part B is picked up without waiting for idle sleep
-          updateStatusLog({ _fileReceived: true });
-        } else {
-          await sendCallback(excelFile.name, 'DONE', completedAt);
-        }
-      }
-
-      try { await page.screenshot({ path: `done-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
-      console.log(`🎉 ${excelFile.name} — DONE!`);
-      break;
-    }
-
-    if (status && /fail/i.test(status)) {
-      isFailed = true;
-      const failedAt = new Date().toISOString();
-      if (excelFile.isMerged) {
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          rec.status = 'FAILED';
-          rec.failedAt = failedAt;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-        // Delete temp file — source files remain pending for next bin-pack cycle
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
-        sendAlert('❌ MTN GroupShare — Merged Upload Failed', `Batch "${excelFile.name}" FAILED on MTN's end. Source files re-queued: ${srcNames}`);
-      } else {
-        updateStatusLog({
-          [excelFile.name]: 'FAILED',
-          [`${excelFile.name}_failedAt`]: failedAt,
-        });
-        const failLog = loadStatusLog();
-        if (failLog[`${excelFile.name}_isSplitIntermediate`]) {
-          // Part A failed — cascade abandon Part B so the order doesn't appear complete
-          const partBName = failLog[`${excelFile.name}_partnerPart`];
-          if (partBName) {
-            updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: failedAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was FAILED by MTN` });
-            try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
-            sendAlert('❌ MTN GroupShare — Split Part A Failed', `"${excelFile.name}" (split Part A) was FAILED by MTN.\nPart B "${partBName}" abandoned. Sending ABANDONED callback.`);
-            await sendCallback(partBName, 'ABANDONED', failedAt);
-          } else {
-            sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
-          }
-        } else if (failLog[`${excelFile.name}_isSplitFinal`]) {
-          // Part B failed — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
-          const originalFile = failLog[`${excelFile.name}_originalFile`] || excelFile.name;
-          const splitAttempt = (failLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
-          if (splitAttempt < MAX_SPLIT_B_CYCLES) {
-            updateStatusLog({
-              [excelFile.name]: null,
-              [`${excelFile.name}_failedAt`]: null,
-              [`${excelFile.name}_retryCount`]: 0,
-              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-            });
-            sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") was FAILED by MTN (attempt ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
-          } else {
-            updateStatusLog({
-              [excelFile.name]: 'STUCK',
-              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-            });
-            sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") failed all ${MAX_SPLIT_B_CYCLES} upload attempts. Please process manually.`);
-          }
-        } else {
-          sendAlert('❌ MTN GroupShare — Upload Failed', `"${excelFile.name}" was marked as FAILED by MTN. Please check the portal.`);
-        }
-      }
-      try { await page.screenshot({ path: `failed-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
-      console.error(`❌ ${excelFile.name} — FAILED on MTN's end`);
-      break;
-    }
-
-    if (attempt < maxAttempts) await page.waitForTimeout(pollInterval);
-  }
-
-  if (!isDone && !isFailed) {
-    const currentStatus = loadStatusLog();
-    const existingRetry = excelFile.isMerged
-      ? (currentStatus[excelFile.name]?.retryCount || 0)
-      : (currentStatus[`${excelFile.name}_retryCount`] || 0);
-    const retryCount = existingRetry + 1;
-    const timedOutAt = new Date().toISOString();
-
-    if (retryCount >= MAX_FILE_RETRIES) {
-      if (excelFile.isMerged) {
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          rec.status = 'ABANDONED';
-          rec.timedOutAt = timedOutAt;
-          rec.retryCount = retryCount;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-        // Delete temp merged file — source files stay pending so they re-enter next cycle
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        const srcNames = (loadStatusLog()[excelFile.name]?.sourceFiles || []).map(s => s.filename).join(', ');
-        sendAlert('🚫 MTN GroupShare — Merged Batch Abandoned', `Batch "${excelFile.name}" abandoned after ${retryCount} timeouts. Source files re-queued: ${srcNames}`);
-      } else {
-        updateStatusLog({
-          [excelFile.name]: 'ABANDONED',
-          [`${excelFile.name}_timedOutAt`]: timedOutAt,
-          [`${excelFile.name}_retryCount`]: retryCount,
-        });
-        const pollAbandonLog = loadStatusLog();
-        if (pollAbandonLog[`${excelFile.name}_isSplitIntermediate`]) {
-          // Part A abandoned — cascade abandon Part B so the order doesn't remain half-done
-          const partBName = pollAbandonLog[`${excelFile.name}_partnerPart`];
-          if (partBName) {
-            updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: timedOutAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was abandoned` });
-            try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
-            sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) timed out ${retryCount} times.\nPart B "${partBName}" also abandoned. Sending ABANDONED callback.`);
-            await sendCallback(partBName, 'ABANDONED', timedOutAt);
-          } else {
-            sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
-            await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
-          }
-        } else if (pollAbandonLog[`${excelFile.name}_isSplitFinal`]) {
-          // Part B poll-abandoned — retry instead of abandoning; only escalate after MAX_SPLIT_B_CYCLES
-          const originalFile = pollAbandonLog[`${excelFile.name}_originalFile`] || excelFile.name;
-          const splitAttempt = (pollAbandonLog[`${excelFile.name}_splitFinalAttempt`] || 0) + 1;
-          if (splitAttempt < MAX_SPLIT_B_CYCLES) {
-            updateStatusLog({
-              [excelFile.name]: null,
-              [`${excelFile.name}_timedOutAt`]: null,
-              [`${excelFile.name}_retryCount`]: 0,
-              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-            });
-            sendAlert('⚠️ MTN GroupShare — Split Part B Retry', `"${excelFile.name}" (split Part B, original: "${originalFile}") timed out ${retryCount} times (cycle ${splitAttempt}/${MAX_SPLIT_B_CYCLES}). Re-queuing for retry.`);
-          } else {
-            updateStatusLog({
-              [excelFile.name]: 'STUCK',
-              [`${excelFile.name}_splitFinalAttempt`]: splitAttempt,
-            });
-            sendAlert('🚨 MTN GroupShare — Split Part B Needs Intervention', `"${excelFile.name}" (split Part B, original: "${originalFile}") has exhausted ${MAX_SPLIT_B_CYCLES} upload cycles. Please process manually.`);
-          }
-        } else {
-          sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" timed out ${retryCount} times and has been permanently abandoned. Please check the portal manually.`);
-          await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
-        }
-      }
-      console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} timeout(s)`);
-      try { await page.screenshot({ path: `abandoned-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
+    markAsUploaded(excelFile.name);
+    const singleQueuedAt = loadStatusLog()[`${excelFile.name}_queuedAt`];
+    const singleDurationMs = singleQueuedAt ? Date.now() - new Date(singleQueuedAt).getTime() : null;
+    updateStatusLog({
+      [excelFile.name]: 'DONE',
+      [`${excelFile.name}_completedAt`]: completedAt,
+      ...(singleDurationMs != null ? { [`${excelFile.name}_processingDurationMs`]: singleDurationMs } : {}),
+    });
+    const splitLog = loadStatusLog();
+    if (splitLog[`${excelFile.name}_isSplitIntermediate`]) {
+      console.log(`✂️  Split Part A "${excelFile.name}" DONE — holding callback until Part B completes`);
+      updateStatusLog({ _fileReceived: true });
     } else {
-      if (excelFile.isMerged) {
-        withFileLock(STATUS_LOG, () => {
-          const l = loadStatusLog();
-          const rec = l[excelFile.name] || {};
-          rec.status = 'TIMEOUT';
-          rec.timedOutAt = timedOutAt;
-          rec.retryCount = retryCount;
-          l[excelFile.name] = rec;
-          atomicWrite(STATUS_LOG, JSON.stringify(l, null, 2));
-        });
-        // Delete temp merged file — will be rebuilt on next cycle
-        try { fs.unlinkSync(excelFile.fullPath); } catch {}
-        sendAlert('⚠️ MTN GroupShare — Merged Batch Timeout', `Batch "${excelFile.name}" timed out (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
-      } else {
-        updateStatusLog({
-          [excelFile.name]: 'TIMEOUT',
-          [`${excelFile.name}_timedOutAt`]: timedOutAt,
-          [`${excelFile.name}_retryCount`]: retryCount,
-        });
-        sendAlert('⚠️ MTN GroupShare — Processing Timeout', `"${excelFile.name}" did not reach DONE within 35 minutes (attempt ${retryCount}/${MAX_FILE_RETRIES}). Manual resolution required via dashboard.`);
-      }
-      console.warn(`⚠️  Timed out: ${excelFile.name} (attempt ${retryCount}/${MAX_FILE_RETRIES}) — TIMEOUT, manual resolution required`);
-      try { await page.screenshot({ path: `timeout-${fileName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
+      await sendCallback(excelFile.name, 'DONE', completedAt);
     }
   }
 
-  return isDone;
+  try { await page.screenshot({ path: `done-${fullBaseName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
+  console.log(`🎉 ${excelFile.name} — DONE!`);
+  sendAlert('🎉 MTN GroupShare — Data Purchased', `"${groupName}" group created and beneficiaries uploaded successfully.`);
+  return true;
 }
 
 async function run() {
@@ -2063,17 +1734,26 @@ async function run() {
         const splitParts = pendingFiles.filter(f =>
           cycleLog[`${f.name}_isSplitIntermediate`] || cycleLog[`${f.name}_isSplitFinal`]
         );
+        // Zip-extracted files carry a fixed allocation in their filename and must
+        // each create their own group — never merge them with anything.
+        const zipParts = pendingFiles.filter(f =>
+          !cycleLog[`${f.name}_isSplitIntermediate`] && !cycleLog[`${f.name}_isSplitFinal`] &&
+          cycleLog[`${f.name}_isZipExtracted`]
+        );
         const regularFiles = pendingFiles.filter(f =>
-          !cycleLog[`${f.name}_isSplitIntermediate`] && !cycleLog[`${f.name}_isSplitFinal`]
+          !cycleLog[`${f.name}_isSplitIntermediate`] && !cycleLog[`${f.name}_isSplitFinal`] &&
+          !cycleLog[`${f.name}_isZipExtracted`]
         );
 
-        // If a split part is waiting, upload it standalone — skip bin-pack this cycle.
-        // Always pick Part A (isSplitIntermediate) before Part B (isSplitFinal) — the
-        // largest-first sort would otherwise surface Part B first since it holds more rows.
-        const filesToPack = splitParts.length > 0 ? [] : regularFiles;
+        // Priority: split parts first, then zip-extracted files (oldest first),
+        // then bin-pack regular files when neither category has waiting files.
+        // Always pick Part A (isSplitIntermediate) before Part B (isSplitFinal).
+        const filesToPack = (splitParts.length > 0 || zipParts.length > 0) ? [] : regularFiles;
         const forceSingleFile = splitParts.length > 0
           ? (splitParts.find(f => cycleLog[`${f.name}_isSplitIntermediate`]) || splitParts[0])
-          : null;
+          : zipParts.length > 0
+            ? zipParts[0] // oldest zip file first (already sorted by mtime)
+            : null;
 
         // ── Optimal bin-pack: maximise balance consumption ────────────────────
         // findOptimalBatch picks the combination of files that uses as much of

@@ -22,6 +22,7 @@
     "node-notifier": "^10.0.1",
     "node-telegram-bot-api": "^0.67.0",
     "playwright": "^1.59.1",
+    "unzipper": "^0.12.5",
     "xlsx": "^0.18.5"
   }
 }

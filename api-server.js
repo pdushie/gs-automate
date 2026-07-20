@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const XLSX = require('xlsx');
+const unzipper = require('unzipper');
 require('dotenv').config();
 const { withFileLock, atomicWrite } = require('./lock');
 const crypto      = require('crypto');
@@ -29,6 +30,81 @@ const UPLOADED_LOG  = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded
 const STATUS_LOG    = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
 const SESSION_LOG   = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.sessions.json');
 const RETENTION_HOURS = parseInt(process.env.FILE_RETENTION_HOURS || '24');
+
+function normalizeRelativePath(filePath, basePath) {
+  return path.relative(path.resolve(basePath), path.resolve(filePath)).split(path.sep).join('/');
+}
+
+function isSpreadsheetFile(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const base = path.basename(filePath);
+  return (ext === '.xlsx' || ext === '.xls') && !base.startsWith('NM-merged-');
+}
+
+function listFilesRecursive(folderPath) {
+  const results = [];
+
+  function visit(dirPath) {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      results.push({
+        name: normalizeRelativePath(fullPath, folderPath),
+        fullPath,
+        mtime: fs.statSync(fullPath).mtime,
+      });
+    }
+  }
+
+  visit(folderPath);
+  return results;
+}
+
+async function extractZipArchive(zipPath, extractDir) {
+  await fs.promises.mkdir(extractDir, { recursive: true });
+  await new Promise((resolve, reject) => {
+    fs.createReadStream(zipPath)
+      .pipe(unzipper.Extract({ path: extractDir }))
+      .on('close', resolve)
+      .on('finish', resolve)
+      .on('error', reject);
+  });
+}
+
+async function storeReceivedZip(zipPath) {
+  const zipName = path.basename(zipPath);
+  const zipBase = path.basename(zipPath, path.extname(zipPath));
+  const zipFolder = path.join(process.env.EXCEL_FOLDER_PATH, zipBase);
+  const storedZipPath = path.join(zipFolder, zipName);
+
+  await fs.promises.mkdir(zipFolder, { recursive: true });
+  if (path.resolve(zipPath) !== path.resolve(storedZipPath)) {
+    await fs.promises.rename(zipPath, storedZipPath);
+  }
+  await extractZipArchive(storedZipPath, zipFolder);
+  return { zipFolder, storedZipPath };
+}
+
+function collectSpreadsheetEntries(folderPath) {
+  return listFilesRecursive(folderPath).filter(entry => isSpreadsheetFile(entry.fullPath));
+}
+
+function coerceOrderIds(value) {
+  if (Array.isArray(value) && value.length > 0) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
+    return [value];
+  }
+  return null;
+}
 
 
 // ── AUTH ─────────────────────────────────────────────────
@@ -159,10 +235,11 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    if (file.originalname.endsWith('.xlsx') || file.originalname.endsWith('.xls')) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === '.xlsx' || ext === '.xls' || ext === '.zip') {
       cb(null, true);
     } else {
-      cb(new Error('Only .xlsx and .xls files are allowed'));
+      cb(new Error('Only .xlsx, .xls, and .zip files are allowed'));
     }
   }
 });
@@ -230,18 +307,16 @@ function getDiskUsage() {
 
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   try {
-    const files = fs.readdirSync(folderPath);
+    const files = listFilesRecursive(folderPath);
     let totalBytes = 0;
     let fileCount = 0;
 
     for (const file of files) {
-      if (file.startsWith('.')) continue; // skip hidden log files
-      const filePath = path.join(folderPath, file);
-      const stat = fs.statSync(filePath);
-      if (stat.isFile()) {
-        totalBytes += stat.size;
-        fileCount++;
-      }
+      if (path.basename(file.name).startsWith('.')) continue; // skip hidden log files
+      const stat = fs.statSync(file.fullPath);
+      if (!stat.isFile()) continue;
+      totalBytes += stat.size;
+      fileCount++;
     }
 
     const result = {
@@ -270,11 +345,11 @@ function cleanupOldFiles() {
   const deletedFiles = [];
 
   try {
-    const files = fs.readdirSync(folderPath)
-      .filter(f => f.endsWith('.xlsx') || f.endsWith('.xls'));
+    const files = listFilesRecursive(folderPath)
+      .filter(f => isSpreadsheetFile(f.fullPath));
 
     for (const file of files) {
-      const isDone = uploaded.includes(file) || statusLog[file] === 'DONE';
+      const isDone = uploaded.includes(file.name) || statusLog[file.name] === 'DONE';
 
       // Never delete files that are still PENDING or being processed
       if (!isDone) {
@@ -282,20 +357,20 @@ function cleanupOldFiles() {
         continue;
       }
 
-      const completedAt = statusLog[file + '_completedAt'];
+      const completedAt = statusLog[file.name + '_completedAt'];
       const completedTime = completedAt ? new Date(completedAt).getTime() : null;
 
       // Fall back to file modified time if completedAt is missing
-      const filePath = path.join(folderPath, file);
+      const filePath = file.fullPath;
       const fileMtime = fs.statSync(filePath).mtimeMs;
       const ageMs = now - (completedTime || fileMtime);
       const ageHours = Math.round(ageMs / 3600000);
 
       if (ageMs >= retentionMs) {
         fs.unlinkSync(filePath);
-        deletedFiles.push({ filename: file, ageHours });
+        deletedFiles.push({ filename: file.name, ageHours });
         deleted++;
-        console.log(`🗑️  Cleaned up: ${file} (age: ${ageHours}h)`);
+        console.log(`🗑️  Cleaned up: ${file.name} (age: ${ageHours}h)`);
       }
     }
 
@@ -379,19 +454,19 @@ function getPendingQueueTotalMB(statusLog, uploadedLog, availableMB = 0) {
   const DONE_STATES = new Set(['DONE', 'ABANDONED', 'FAILED']);
   let totalMB = 0;
 
-  const files = fs.readdirSync(folderPath)
-    .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'));
+  const files = listFilesRecursive(folderPath)
+    .filter(f => isSpreadsheetFile(f.fullPath));
 
   for (const file of files) {
-    if (uploadedLog.includes(file)) continue;
-    if (DONE_STATES.has(statusLog[file])) continue;
+    if (uploadedLog.includes(file.name)) continue;
+    if (DONE_STATES.has(statusLog[file.name])) continue;
 
     let fileMB = 0;
-    if (statusLog[`${file}_totalMB`] != null) {
-      fileMB = statusLog[`${file}_totalMB`];
+    if (statusLog[`${file.name}_totalMB`] != null) {
+      fileMB = statusLog[`${file.name}_totalMB`];
     } else {
       // Cache miss — parse the file directly
-      const { totalDataGB } = getExcelStats(path.join(folderPath, file));
+      const { totalDataGB } = getExcelStats(file.fullPath);
       if (totalDataGB != null) fileMB = totalDataGB * 1024;
     }
 
@@ -541,11 +616,14 @@ app.get('/auth/status', (req, res) => {
 });
 
 
-// POST /upload — accept an Excel file from external app
-app.post('/upload', upload.single('file'), (req, res) => {
+// POST /upload — accept an Excel file or zip archive from external app
+app.post('/upload', upload.single('file'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
+
+  const isZip = path.extname(req.file.originalname).toLowerCase() === '.zip';
+  const queuedAt = new Date().toISOString();
 
   // Hard queue depth enforcement — reject immediately if queue is full.
   // This is the authoritative gate; /balance is only a soft advisory signal.
@@ -566,6 +644,47 @@ app.post('/upload', upload.single('file'), (req, res) => {
     }
   }
 
+  if (isZip) {
+    try {
+      const { zipFolder, storedZipPath } = await storeReceivedZip(req.file.path);
+      const extractedFiles = collectSpreadsheetEntries(zipFolder);
+      if (extractedFiles.length === 0) {
+        throw new Error('Zip archive did not contain any .xlsx or .xls files');
+      }
+
+      const uploadOrderIds = coerceOrderIds(req.body?.orderIds);
+      const orderMeta = { _fileReceived: true };
+      for (const file of extractedFiles) {
+        orderMeta[`${file.name}_queuedAt`] = queuedAt;
+        orderMeta[`${file.name}_isZipExtracted`] = true; // never merge with other files
+        if (uploadOrderIds) {
+          orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
+        } else if (req.body?.orderId) {
+          orderMeta[`${file.name}_orderId`] = req.body.orderId;
+        }
+      }
+
+      withFileLock(STATUS_LOG, () => {
+        const log = loadStatusLog();
+        saveStatusLog({ ...log, ...orderMeta });
+      });
+
+      console.log(`📦 API received zip archive: ${path.basename(storedZipPath)} → extracted ${extractedFiles.length} spreadsheet(s) into ${zipFolder}`);
+      return res.json({
+        success: true,
+        message: 'Zip archive extracted and queued for processing',
+        filename: path.basename(storedZipPath),
+        folder: path.basename(zipFolder),
+        queuedAt,
+        extractedFiles: extractedFiles.map(f => f.name),
+      });
+    } catch (err) {
+      console.error(`❌ Failed to extract zip archive "${req.file.originalname}": ${err.message}`);
+      try { fs.unlinkSync(req.file.path); } catch {}
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
   // Warn if the cached balance suggests the file may exceed available data,
   // but skip the XLSX parse — the bot has its own cached total and the
   // synchronous XLSX.readFile blocks the event loop on large files.
@@ -580,28 +699,29 @@ app.post('/upload', upload.single('file'), (req, res) => {
 
   withFileLock(STATUS_LOG, () => {
     const log = loadStatusLog();
-    saveStatusLog({ ...log, _fileReceived: true, [`${req.file.filename}_queuedAt`]: new Date().toISOString() });
+    saveStatusLog({ ...log, _fileReceived: true, [`${req.file.filename}_queuedAt`]: queuedAt });
   });
   console.log(`📥 API received file: ${req.file.filename}`);
   res.json({
     success: true,
     message: 'File queued for processing',
     filename: req.file.filename,
-    queuedAt: new Date().toISOString(),
+    queuedAt,
   });
 });
 
 
-// POST /upload-base64 — accept Excel as base64 string
-app.post('/upload-base64', (req, res) => {
+// POST /upload-base64 — accept Excel or zip as base64 string
+app.post('/upload-base64', async (req, res) => {
   const { filename, data, orderId, orderIds } = req.body;
 
   if (!filename || !data) {
     return res.status(400).json({ success: false, error: 'filename and data are required' });
   }
 
-  if (!filename.endsWith('.xlsx') && !filename.endsWith('.xls')) {
-    return res.status(400).json({ success: false, error: 'Only .xlsx and .xls files are allowed' });
+  const ext = path.extname(filename).toLowerCase();
+  if (!['.xlsx', '.xls', '.zip'].includes(ext)) {
+    return res.status(400).json({ success: false, error: 'Only .xlsx, .xls, and .zip files are allowed' });
   }
 
   // Hard queue depth enforcement
@@ -633,17 +753,53 @@ app.post('/upload-base64', (req, res) => {
       console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
     }
 
-    const ext = path.extname(filename);
     const base = path.basename(filename, ext);
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const savedName = `${base}-${timestamp}${ext}`;
     const savePath = path.join(process.env.EXCEL_FOLDER_PATH, savedName);
+    const queuedAt = new Date().toISOString();
+
+    if (ext === '.zip') {
+      fs.writeFileSync(savePath, buffer);
+      const { zipFolder, storedZipPath } = await storeReceivedZip(savePath);
+      const extractedFiles = collectSpreadsheetEntries(zipFolder);
+      if (extractedFiles.length === 0) {
+        throw new Error('Zip archive did not contain any .xlsx or .xls files');
+      }
+
+      const uploadOrderIds = coerceOrderIds(orderIds);
+      const orderMeta = { _fileReceived: true };
+      for (const file of extractedFiles) {
+        orderMeta[`${file.name}_queuedAt`] = queuedAt;
+        orderMeta[`${file.name}_isZipExtracted`] = true; // never merge with other files
+        if (uploadOrderIds) {
+          orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
+        } else if (orderId) {
+          orderMeta[`${file.name}_orderId`] = orderId;
+        }
+      }
+
+      withFileLock(STATUS_LOG, () => {
+        const log = loadStatusLog();
+        saveStatusLog({ ...log, ...orderMeta });
+      });
+
+      console.log(`📦 API received base64 zip: ${path.basename(storedZipPath)} → extracted ${extractedFiles.length} spreadsheet(s) into ${zipFolder}`);
+      return res.json({
+        success: true,
+        message: 'Zip archive extracted and queued for processing',
+        filename: path.basename(storedZipPath),
+        folder: path.basename(zipFolder),
+        queuedAt,
+        extractedFiles: extractedFiles.map(f => f.name),
+      });
+    }
 
     fs.writeFileSync(savePath, buffer);
     console.log(`📥 API received base64 file: ${savedName}`);
 
     // Persist order reference(s) and wake the idle bot
-    const orderMeta = { _fileReceived: true, [`${savedName}_queuedAt`]: new Date().toISOString() };
+    const orderMeta = { _fileReceived: true, [`${savedName}_queuedAt`]: queuedAt };
     if (Array.isArray(orderIds) && orderIds.length > 0) {
       orderMeta[`${savedName}_orderIds`] = orderIds;
     } else if (orderId) {
@@ -660,7 +816,7 @@ app.post('/upload-base64', (req, res) => {
       success: true,
       message: 'File queued for processing',
       filename: savedName,
-      queuedAt: new Date().toISOString(),
+      queuedAt,
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -770,20 +926,20 @@ app.get('/status', (req, res) => {
   const uploaded  = loadUploadedLog();
   const statusLog = loadStatusLog();
 
-  const allFiles = fs.readdirSync(folderPath)
-    .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
+  const allFiles = listFilesRecursive(folderPath)
+    .filter(f => isSpreadsheetFile(f.fullPath))
     .map(f => {
-      const resolved = resolveFileStatus(f, uploaded, statusLog);
+      const resolved = resolveFileStatus(f.name, uploaded, statusLog);
       // Use the bot's cached _totalMB from the status log — avoids a synchronous
       // XLSX.readFile() call for every file on every request.
-      const cachedMB = statusLog[`${f}_totalMB`];
+      const cachedMB = statusLog[`${f.name}_totalMB`];
       const entry = {
-        filename:     f,
+        filename:     f.name,
         status:       resolved.status,
         queuedAt:     resolved.queuedAt,
         completedAt:  resolved.completedAt,
         totalDataGB:  cachedMB != null ? parseFloat((cachedMB / 1024).toFixed(4)) : null,
-        rowCount:     statusLog[`${f}_rowCount`] || null,
+        rowCount:     statusLog[`${f.name}_rowCount`] || null,
       };
       if (resolved.orderIds) entry.orderIds = resolved.orderIds;
       else if (resolved.orderId) entry.orderId = resolved.orderId;
@@ -814,8 +970,8 @@ app.get('/status', (req, res) => {
 
 
 // GET /status/:filename — get status of a specific file
-app.get('/status/:filename', (req, res) => {
-  const { filename } = req.params;
+app.get(/^\/status\/(.+)$/, (req, res) => {
+  const filename = decodeURIComponent(req.params[0]).replace(/\\/g, '/');
   const uploaded  = loadUploadedLog();
   const statusLog = loadStatusLog();
 
@@ -912,9 +1068,9 @@ function getPendingFileCount() {
     const uploaded  = loadUploadedLog();
     const statusLog = loadStatusLog();
     const PENDING_STATES = new Set(['PENDING', 'TIMEOUT', 'IN_PROGRESS', 'PROCESSING']);
-    return fs.readdirSync(folderPath)
-      .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
-      .filter(f => PENDING_STATES.has(resolveFileStatus(f, uploaded, statusLog).status))
+    return listFilesRecursive(folderPath)
+      .filter(f => isSpreadsheetFile(f.fullPath))
+      .filter(f => PENDING_STATES.has(resolveFileStatus(f.name, uploaded, statusLog).status))
       .length;
   } catch {
     return 0;
@@ -1436,27 +1592,27 @@ app.get('/summary', requireAuth, (req, res) => {
 
   let files;
   try {
-    files = fs.readdirSync(folderPath)
-      .filter(f => (f.endsWith('.xlsx') || f.endsWith('.xls')) && !f.startsWith('NM-merged-'))
+    files = listFilesRecursive(folderPath)
+      .filter(f => isSpreadsheetFile(f.fullPath))
       .map(f => {
-        const resolved   = resolveFileStatus(f, uploaded, statusLog);
-        const cachedMB   = statusLog[`${f}_totalMB`];
+        const resolved   = resolveFileStatus(f.name, uploaded, statusLog);
+        const cachedMB   = statusLog[`${f.name}_totalMB`];
         const totalDataGB = cachedMB != null
           ? parseFloat((cachedMB / 1024).toFixed(4))
           : null;
 
         const entry = {
-          filename:             f,
+          filename:             f.name,
           status:               resolved.status,
           totalDataGB,
           queuedAt:             resolved.queuedAt   || null,
-          startedAt:            statusLog[`${f}_startedAt`]  || null,
+          startedAt:            statusLog[`${f.name}_startedAt`]  || null,
           completedAt:          resolved.completedAt || null,
-          failedAt:             statusLog[`${f}_failedAt`]   || null,
-          timedOutAt:           statusLog[`${f}_timedOutAt`] || null,
-          retryCount:           statusLog[`${f}_retryCount`] || 0,
+          failedAt:             statusLog[`${f.name}_failedAt`]   || null,
+          timedOutAt:           statusLog[`${f.name}_timedOutAt`] || null,
+          retryCount:           statusLog[`${f.name}_retryCount`] || 0,
           mergedBatch:          resolved.mergedBatch || null,
-          processingDurationMs: statusLog[`${f}_processingDurationMs`] ?? resolved.processingDurationMs ?? null,
+          processingDurationMs: statusLog[`${f.name}_processingDurationMs`] ?? resolved.processingDurationMs ?? null,
         };
 
         if (resolved.orderIds)     entry.orderIds = resolved.orderIds;
