@@ -465,7 +465,7 @@ async function login(page) {
 
         const navigationPromise = page.waitForURL(
           url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
-          { timeout: 240000, waitUntil: 'networkidle' }
+          { timeout: 240000, waitUntil: 'domcontentloaded' }
         );
         await page.dispatchEvent('#login-btn', 'click');
         await navigationPromise;
