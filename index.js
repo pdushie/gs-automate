@@ -420,14 +420,51 @@ async function login(page) {
     if (page.url().includes('/account/verify-otp')) {
       console.log('✅ Already on OTP page — skipping credential submission');
     } else {
-      await page.waitForSelector('#disclaimer-btn', { timeout: 60000 });
-      await page.waitForTimeout(5000);
-      await page.dispatchEvent('#disclaimer-btn', 'click');
+      // Some portal renders need a real click, others only respond to a
+      // programmatic event. Try both before failing.
+      await page.waitForSelector('#disclaimer-btn', { state: 'attached', timeout: 60000 });
+      const disclaimerBtn = page.locator('#disclaimer-btn');
+      try {
+        await disclaimerBtn.waitFor({ state: 'visible', timeout: 20000 });
+        await disclaimerBtn.scrollIntoViewIfNeeded();
+        await disclaimerBtn.click({ timeout: 10000 });
+      } catch (clickErr) {
+        console.warn(`⚠️  Disclaimer click() failed: ${clickErr.message} — trying dispatchEvent fallback`);
+        try {
+          await page.dispatchEvent('#disclaimer-btn', 'click');
+        } catch {
+          await page.evaluate(() => {
+            const byId = document.querySelector('#disclaimer-btn');
+            const byText = Array.from(document.querySelectorAll('button'))
+              .find(b => /I\s*Agree,\s*Continue/i.test((b.textContent || '').trim()));
+            const btn = byId || byText;
+            if (!btn) throw new Error('Disclaimer button not found');
+            btn.click();
+          });
+        }
+      }
       console.log('✅ Disclaimer accepted');
 
-      await page.waitForSelector('input[name="Msisdn"]', { timeout: 30000 });
-      await page.fill('input[name="Msisdn"]', process.env.MTN_PHONE);
-      await page.fill('input[name="Pin"]', process.env.MTN_PIN);
+      await page.waitForSelector('input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]', {
+        state: 'visible',
+        timeout: 30000,
+      });
+      const msisdnInput = page.locator('input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]').first();
+      await msisdnInput.click({ timeout: 10000 });
+      await msisdnInput.fill('');
+      await msisdnInput.fill((process.env.MTN_PHONE || '').trim());
+      await page.waitForSelector('input[type="password"][name="Pin"], input[name="Pin"]', {
+        state: 'visible',
+        timeout: 30000,
+      });
+      const pinInput = page.locator('input[type="password"][name="Pin"], input[name="Pin"]').first();
+      await pinInput.click({ timeout: 10000 });
+      await pinInput.fill('');
+      await pinInput.fill((process.env.MTN_PIN || '').trim());
+      const loginCredsStamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const loginCredsShot = `login-credentials-filled-${loginCredsStamp}.png`;
+      await page.screenshot({ path: loginCredsShot, fullPage: true, timeout: 180000 });
+      console.log(`📸 Screenshot saved — ${loginCredsShot}`);
       await page.dispatchEvent('#login-btn', 'click');
       console.log('🚀 Login clicked');
 
