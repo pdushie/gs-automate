@@ -405,6 +405,35 @@ async function isSessionActive(page) {
 async function login(page) {
   const maxSubmitAttempts = 3;
 
+  async function clickLoginButton(stepTag = 'submit') {
+    const loginBtn = page.locator('#login-btn').first();
+    try {
+      await loginBtn.waitFor({ state: 'visible', timeout: 20000 });
+      await loginBtn.scrollIntoViewIfNeeded();
+      await loginBtn.click({ timeout: 10000 });
+    } catch (clickErr) {
+      console.warn(`⚠️  Login button click() failed: ${clickErr.message} — trying dispatchEvent fallback`);
+      try {
+        await page.dispatchEvent('#login-btn', 'click');
+      } catch {
+        await page.evaluate(() => {
+          const byId = document.querySelector('#login-btn');
+          const byText = Array.from(document.querySelectorAll('button'))
+            .find(b => /\bLogin\b/i.test((b.textContent || '').trim()));
+          const btn = byId || byText;
+          if (!btn) throw new Error('Login button not found');
+          btn.click();
+        });
+      }
+    }
+
+    await page.waitForTimeout(4000);
+    const clickStamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const postClickShot = `login-post-click-${stepTag}-${clickStamp}.png`;
+    await page.screenshot({ path: postClickShot, fullPage: true, timeout: 180000 });
+    console.log(`📸 Screenshot saved — ${postClickShot}`);
+  }
+
   try {
     // ── Phase 1: Submit credentials ONCE to get to the OTP page ──────────
     // Use gotoWithRetry so transient ERR_EMPTY_RESPONSE / portal blips don't
@@ -465,7 +494,7 @@ async function login(page) {
       const loginCredsShot = `login-credentials-filled-${loginCredsStamp}.png`;
       await page.screenshot({ path: loginCredsShot, fullPage: true, timeout: 180000 });
       console.log(`📸 Screenshot saved — ${loginCredsShot}`);
-      await page.dispatchEvent('#login-btn', 'click');
+      await clickLoginButton('credentials');
       console.log('🚀 Login clicked');
 
       await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
@@ -504,7 +533,7 @@ async function login(page) {
           url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
           { timeout: 240000, waitUntil: 'domcontentloaded' }
         );
-        await page.dispatchEvent('#login-btn', 'click');
+        await clickLoginButton(`otp-attempt-${attempt}`);
         await navigationPromise;
 
         if (await isSessionActive(page)) {
