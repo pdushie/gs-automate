@@ -408,11 +408,25 @@ function parseBalanceToMB(balanceText) {
 
 async function isSessionActive(page) {
   try {
+    // Smart path: if we're already on the MTN portal, prefer waiting for page
+    // readiness in-place. This avoids unnecessary fresh goto() calls that can
+    // timeout on slow portal responses.
+    const currentUrl = page.url();
+    if (currentUrl.includes('up2u.mtn.com.gh')) {
+      try {
+        await waitForPortalReady(page, 30000);
+      } catch {
+        // Fallback to a real navigation below if in-place readiness did not settle.
+      }
+    }
+
+    // Fallback navigation path for non-portal pages or stale/incomplete states.
     // Use gotoWithRetry so a single brief blip doesn't incorrectly invalidate a
-    // live session. Keep timeout short (15s) and retries low (2) so the check
-    // stays fast; fall back to URL check if even retries time out.
+    // live session.
     try {
-      await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+      if (!page.url().includes('up2u.mtn.com.gh')) {
+        await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+      }
       await waitForPortalReady(page, 180000);
     } catch (navErr) {
       // Navigation timed out — check current URL anyway before giving up
@@ -420,10 +434,10 @@ async function isSessionActive(page) {
       console.warn(`⚠️  Session check: navigation slow (${navErr.message}) — checking URL anyway`);
     }
     _lastPortalNavAt = Date.now();
-    const currentUrl = page.url();
+    const activeUrl = page.url();
 
-    if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
-      console.log('🔒 Session expired — redirected to:', currentUrl);
+    if (activeUrl.includes('/account/login') || activeUrl.includes('/account/verify-otp')) {
+      console.log('🔒 Session expired — redirected to:', activeUrl);
       return false;
     }
 
@@ -1829,7 +1843,14 @@ async function run() {
         if (Date.now() - _lastPortalNavAt >= KEEP_ALIVE_INTERVAL_MS) {
           try {
             console.log(`🫀 Keep-alive: reloading portal page (last nav ${Math.round((Date.now() - _lastPortalNavAt) / 1000)}s ago)...`);
-            await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+
+            if (page.url().includes('up2u.mtn.com.gh')) {
+              // Prefer in-place readiness checks to avoid unnecessary goto() timeouts
+              // on slow portal responses while already on the portal domain.
+              await waitForPortalReady(page, 120000);
+            } else {
+              await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+            }
             await waitForPortalReady(page, 120000);
             _lastPortalNavAt = Date.now();
           } catch (kaErr) {
