@@ -513,9 +513,9 @@ async function login(page) {
       }
     }
 
-    await page.waitForTimeout(4000);
     const clickStamp = new Date().toISOString().replace(/[:.]/g, '-');
     const postClickShot = `login-post-click-${stepTag}-${clickStamp}.png`;
+    await waitForPortalReady(page, 120000);
     await page.screenshot({ path: postClickShot, fullPage: true, timeout: 180000 });
     console.log(`📸 Screenshot saved — ${postClickShot}`);
   }
@@ -640,8 +640,8 @@ async function login(page) {
       } catch (submitErr) {
         console.error(`❌ OTP submit attempt ${attempt} failed: ${submitErr.message}`);
         if (attempt < maxSubmitAttempts) {
-          console.log('⏳ Waiting 5s before retry...');
-          await page.waitForTimeout(5000);
+          console.log('⏳ Waiting for OTP page to become ready before retry...');
+          await waitForOtpPageReady(60000);
         }
       }
     }
@@ -709,12 +709,14 @@ async function purchaseData(page, context) {
     console.log('ℹ️  Account balance not available via API — will verify on purchase page');
   }
 
-  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'networkidle' });
-  // Reload to flush any cached balance value the page may render on first load
-  await reloadWithRetry(page, { waitUntil: 'networkidle' });
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
 
   // Read account balance from DOM (secondary verification)
-  await page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { timeout: 15000 });
+  await page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { state: 'visible', timeout: 120000 });
+  await page.waitForFunction(() => {
+    const el = document.querySelector('h3[data-bind*="BalanceFormatted"]');
+    return !!el && el.innerText.trim().length > 0;
+  }, null, { timeout: 120000 });
   const balanceText = await page.$eval('h3[data-bind*="BalanceFormatted"]', el => el.innerText.trim());
   console.log(`💰 Account balance (purchase page): ${balanceText}`);
 
@@ -777,12 +779,11 @@ async function purchaseData(page, context) {
 
   // Wait for modal and click its primary confirm button
   await page.waitForSelector('#confirm-purchase-modal button:has-text("I Agree")', { timeout: 10000 });
-  await page.waitForTimeout(500);
   await page.click('#confirm-purchase-modal button:has-text("I Agree")');
   console.log('✅ "I Agree" clicked in confirmation modal');
 
-  // Wait for the modal to close and the page to settle
-  await page.waitForTimeout(5000);
+  // Wait for the portal to settle after the modal closes and purchase state updates.
+  await waitForPortalReady(page, 120000);
 
   // Confirm purchase by re-reading the data balance — it should have increased
   const { balanceText: newBalanceText, totalMB: newBalanceMB } = await checkBalance(page, context);
@@ -871,7 +872,7 @@ async function checkBalance(page, context) {
     await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
     await waitForPortalReady(page, 180000);
     await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
-    await page.waitForTimeout(2000);
+    await waitForPortalReady(page, 30000);
 
     const balanceText = await page.$eval(
       'h3[data-bind*="DataVolume"]',
@@ -1268,7 +1269,8 @@ async function uploadFile(page, excelFile) {
   }
 
   // ── Navigate to Manage Groups ─────────────────────────────────────────────
-  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle' });
+  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+  await page.waitForSelector('button[aria-haspopup="true"]', { state: 'visible', timeout: 120000 });
   _lastPortalNavAt = Date.now();
 
   // ── Recovery: check if group already exists from a prior failed attempt ────
@@ -1699,7 +1701,8 @@ async function run() {
         updateStatusLog({ _debugNavBeneficiaries: false });
         console.log(`🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test${debugFileName ? ` (file: "${debugFileName}")` : ' (first row)'}...`);
         try {
-          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'networkidle', timeout: 900000 });
+          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+          await page.waitForSelector('button[aria-haspopup="true"]', { state: 'visible', timeout: 900000 });
           console.log('🐛 [DEBUG] manage-groups loaded — saving screenshot...');
           await page.screenshot({ path: 'debug-manage-groups.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-manage-groups.png');
@@ -1707,7 +1710,7 @@ async function run() {
           // If a file name was provided, filter the grid first
           if (debugFileName) {
             console.log(`🐛 [DEBUG] Filtering grid by "${debugFileName}"...`);
-            await page.waitForTimeout(2000);
+            await waitForPortalReady(page, 30000);
             await page.click('th[data-field="GroupName"] a.k-grid-filter');
             await page.waitForSelector('.k-filter-menu input.k-textbox, .k-filter-menu input[type="text"]', { timeout: 5000 });
             await page.screenshot({ path: 'debug-manage-groups-filter-open.png', fullPage: true, timeout: 180000 });
@@ -1729,7 +1732,7 @@ async function run() {
           const debugManageBtn = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
           await debugManageBtn.waitFor({ state: 'visible', timeout: 30000 });
           await debugManageBtn.click();
-          await page.waitForTimeout(1000);
+          await waitForPortalReady(page, 30000);
           await page.screenshot({ path: 'debug-manage-group-dropdown.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-manage-group-dropdown.png');
 
@@ -2092,7 +2095,6 @@ async function run() {
     // Signal the outer watchdog that a fatal crash occurred
     lastFatalCrashAt = Date.now();
   } finally {
-    try { await page.waitForTimeout(5000); } catch {}
     await browser.close();
   }
 }
