@@ -57,6 +57,43 @@ async function reloadWithRetry(page, opts, maxRetries = 3) {
     }
   }
 }
+
+// Wait until the MTN portal is actually interactive instead of relying on a
+// single navigation timeout. Handles both logged-in and auth-redirect states.
+async function waitForPortalReady(page, maxWaitMs = 180000) {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const currentUrl = page.url();
+
+    // If we are redirected to auth pages, portal is still "ready" for the next step.
+    if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
+      return;
+    }
+
+    const hasBalanceWidget = await page.locator('h3[data-bind*="DataVolume"]').first().isVisible().catch(() => false);
+    if (hasBalanceWidget) return;
+
+    // Slow portal: wait briefly for either a useful marker or URL transition,
+    // then re-check rather than failing on a single long timeout.
+    const remaining = maxWaitMs - (Date.now() - start);
+    const sliceMs = Math.min(15000, remaining);
+    try {
+      await Promise.race([
+        page.waitForSelector('h3[data-bind*="DataVolume"]', { state: 'visible', timeout: sliceMs }),
+        page.waitForSelector('input[name="Msisdn"], #disclaimer-btn, #login-btn', { state: 'visible', timeout: sliceMs }),
+        page.waitForURL(url =>
+          url.href.includes('/account/login') ||
+          url.href.includes('/account/verify-otp') ||
+          url.href.includes('up2u.mtn.com.gh'),
+          { timeout: sliceMs, waitUntil: 'domcontentloaded' }
+        ),
+      ]);
+    } catch {
+      // Keep polling until maxWaitMs expires.
+    }
+  }
+  throw new Error(`Portal page not ready after ${Math.round(maxWaitMs / 1000)}s`);
+}
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
@@ -375,7 +412,8 @@ async function isSessionActive(page) {
     // live session. Keep timeout short (15s) and retries low (2) so the check
     // stays fast; fall back to URL check if even retries time out.
     try {
-      await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 15000 }, 2);
+      await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+      await waitForPortalReady(page, 180000);
     } catch (navErr) {
       // Navigation timed out — check current URL anyway before giving up
       if (!page.url().includes('up2u.mtn.com.gh')) throw navErr;
@@ -404,6 +442,40 @@ async function isSessionActive(page) {
 
 async function login(page) {
   const maxSubmitAttempts = 3;
+  const OTP_INPUT_SELECTOR = 'input[type="password"][name="OTPCode"], input[name="OTPCode"]';
+
+  async function waitForOtpPageReady(maxWaitMs = 180000) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < maxWaitMs) {
+      const remaining = maxWaitMs - (Date.now() - startedAt);
+      const sliceMs = Math.min(15000, remaining);
+
+      const onOtpUrl = page.url().includes('/account/verify-otp');
+      const otpVisibleNow = await page.locator(OTP_INPUT_SELECTOR).first().isVisible().catch(() => false);
+      if (onOtpUrl && otpVisibleNow) return;
+
+      try {
+        await Promise.race([
+          page.waitForURL(url => url.href.includes('/account/verify-otp'), {
+            timeout: sliceMs,
+            waitUntil: 'domcontentloaded',
+          }),
+          page.waitForSelector(OTP_INPUT_SELECTOR, {
+            state: 'visible',
+            timeout: sliceMs,
+          }),
+        ]);
+      } catch {
+        // Keep looping until maxWaitMs is reached.
+      }
+
+      const otpVisibleAfterRace = await page.locator(OTP_INPUT_SELECTOR).first().isVisible().catch(() => false);
+      if (page.url().includes('/account/verify-otp') && otpVisibleAfterRace) return;
+    }
+
+    throw new Error(`OTP page not ready after ${Math.round(maxWaitMs / 1000)}s`);
+  }
 
   async function clickLoginButton(stepTag = 'submit') {
     const loginBtn = page.locator('#login-btn').first();
@@ -496,8 +568,7 @@ async function login(page) {
       console.log(`📸 Screenshot saved — ${loginCredsShot}`);
       await clickLoginButton('credentials');
       console.log('🚀 Login clicked');
-
-      await page.waitForURL('**/account/verify-otp', { timeout: 40000 });
+      await waitForOtpPageReady();
     }
 
     // ── Phase 2+3: For each attempt, wait for OTP FIRST then submit ────────
@@ -527,7 +598,18 @@ async function login(page) {
           });
         }
 
-        await page.fill('input[name="OTPCode"]', otp);
+        await page.waitForSelector(OTP_INPUT_SELECTOR, {
+          state: 'visible',
+          timeout: 30000,
+        });
+        const otpInput = page.locator(OTP_INPUT_SELECTOR).first();
+        await otpInput.click({ timeout: 10000 });
+        await otpInput.fill('');
+        await otpInput.fill(String(otp).trim());
+        const otpFilledStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const otpFilledShot = `login-otp-filled-attempt-${attempt}-${otpFilledStamp}.png`;
+        await page.screenshot({ path: otpFilledShot, fullPage: true, timeout: 180000 });
+        console.log(`📸 Screenshot saved — ${otpFilledShot}`);
 
         const navigationPromise = page.waitForURL(
           url => !url.href.includes('/account/verify-otp') && !url.href.includes('/account/login'),
@@ -772,8 +854,8 @@ async function checkBalance(page, context) {
   // we return the last cached balance instead of propagating a fatal crash.
   console.log('\n💰 Checking data balance (DOM)...');
   try {
-    await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'networkidle' });
-    await reloadWithRetry(page, { waitUntil: 'networkidle' });
+    await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+    await waitForPortalReady(page, 180000);
     await page.waitForSelector('h3[data-bind*="DataVolume"]', { timeout: 15000 });
     await page.waitForTimeout(2000);
 
@@ -1747,7 +1829,8 @@ async function run() {
         if (Date.now() - _lastPortalNavAt >= KEEP_ALIVE_INTERVAL_MS) {
           try {
             console.log(`🫀 Keep-alive: reloading portal page (last nav ${Math.round((Date.now() - _lastPortalNavAt) / 1000)}s ago)...`);
-            await page.goto('https://up2u.mtn.com.gh', { waitUntil: 'load', timeout: 30000 });
+            await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+            await waitForPortalReady(page, 120000);
             _lastPortalNavAt = Date.now();
           } catch (kaErr) {
             console.warn(`⚠️  Keep-alive reload failed: ${kaErr.message}`);
