@@ -2155,8 +2155,8 @@ app.post('/evd/auto-toggle', (req, res) => {
   if (!isAuthenticated(req)) return res.status(401).json({ success: false, error: 'Unauthorized' });
   const { enabled } = req.body;
   if (typeof enabled !== 'boolean') return res.status(400).json({ success: false, error: 'enabled must be boolean' });
-  updateStatusLog({ _evdAutoEnabled: enabled });
-  console.log(`🤖 EVD auto-loader ${enabled ? 'enabled' : 'disabled'} via dashboard`);
+  updateStatusLog({ _evdAutoEnabled: enabled, _autoPurchaseEnabled: enabled });
+  console.log(`🤖 EVD auto-loader ${enabled ? 'enabled' : 'disabled'} via dashboard (auto-purchase ${enabled ? 'enabled' : 'disabled'})`);
   return res.json({ success: true, enabled });
 });
 

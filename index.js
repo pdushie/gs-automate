@@ -94,6 +94,42 @@ async function waitForPortalReady(page, maxWaitMs = 180000) {
   }
   throw new Error(`Portal page not ready after ${Math.round(maxWaitMs / 1000)}s`);
 }
+
+// Wait for a selector to exist and satisfy a text predicate. This is used for
+// portal pages that render data asynchronously and may not settle on a fixed
+// timeout under load.
+async function waitForSelectorText(page, selector, predicate, maxWaitMs = 120000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const sliceMs = Math.min(15000, remaining);
+
+    try {
+      await page.waitForSelector(selector, { state: 'attached', timeout: sliceMs });
+      const text = await page.locator(selector).first().innerText({ timeout: sliceMs }).catch(() => '');
+      if (predicate(text)) return text;
+    } catch {
+      // Keep polling until the selector becomes ready and the text matches.
+    }
+  }
+
+  throw new Error(`Timed out waiting for ${selector} to satisfy readiness predicate after ${Math.round(maxWaitMs / 1000)}s`);
+}
+
+async function waitForSelectorVisibleSmart(page, selector, maxWaitMs = 120000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const sliceMs = Math.min(15000, remaining);
+    try {
+      await page.waitForSelector(selector, { state: 'visible', timeout: sliceMs });
+      return;
+    } catch {
+      // Keep polling until maxWaitMs expires.
+    }
+  }
+  throw new Error(`Timed out waiting for visible selector: ${selector} after ${Math.round(maxWaitMs / 1000)}s`);
+}
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
@@ -228,6 +264,24 @@ function sendAlert(title, message) {
         });
     trySend(1);
   }
+}
+
+function isAutoPurchaseEnabled() {
+  const log = loadStatusLog();
+
+  // Explicit dashboard override for auto-purchase
+  if (log._autoPurchaseEnabled != null) return log._autoPurchaseEnabled === true;
+
+  // Backward compatibility: existing dashboard toggle that users may already use.
+  // If EVD auto-loader was explicitly disabled, treat auto-purchase as disabled too.
+  if (log._evdAutoEnabled === false) return false;
+
+  // Optional env override for deployments that want static behavior.
+  if (process.env.AUTO_PURCHASE_ENABLED != null) {
+    return String(process.env.AUTO_PURCHASE_ENABLED).toLowerCase() === 'true';
+  }
+
+  return true;
 }
 
 // Strip the server-added timestamp suffix from a filename before sending callback.
@@ -735,7 +789,7 @@ async function purchaseData(page, context) {
   console.log(`✅ Balance sufficient — proceeding with purchase`);
 
   // Set Data bundle value to 1.5 via Kendo NumericTextBox API
-  await page.waitForSelector('input[name="DataBundle"]', { state: 'attached', timeout: 10000 });
+  await waitForSelectorVisibleSmart(page, 'input[name="DataBundle"]', 120000);
   await page.evaluate(() => {
     const input = document.querySelector('input[name="DataBundle"]');
     const widget = kendo.widgetInstance(jQuery(input));
@@ -746,7 +800,7 @@ async function purchaseData(page, context) {
 
   // Change unit from MB → TB by clicking the Kendo DropDownList
   await page.click('span.k-input:has-text("MB")');
-  await page.waitForSelector('.k-list-container .k-item:has-text("TB"), .k-popup .k-item:has-text("TB")', { timeout: 5000 });
+  await waitForSelectorVisibleSmart(page, '.k-list-container .k-item:has-text("TB"), .k-popup .k-item:has-text("TB")', 120000);
   await page.click('.k-list-container .k-item:has-text("TB"), .k-popup .k-item:has-text("TB")');
   console.log('✅ Unit set to TB');
 
@@ -754,13 +808,14 @@ async function purchaseData(page, context) {
   await page.click('button.uk-button-primary:has-text("Calculate Package Cost")');
   console.log('✅ Calculate Package Cost clicked — waiting for cost table...');
 
-  // Wait for the cost details table to populate
-  await page.waitForFunction(() => {
-    const rows = document.querySelectorAll('tbody[data-template="cost-details-item-template"] tr');
-    return Array.from(rows).some(r => r.innerText.includes('TB'));
-  }, null, { timeout: 15000 });
-
-  const tableText = await page.$eval('tbody[data-template="cost-details-item-template"]', el => el.innerText);
+  // Wait for the cost table to actually populate, rather than relying on a
+  // fixed timer that can fail on slower portal responses.
+  const tableText = await waitForSelectorText(
+    page,
+    'tbody[data-template="cost-details-item-template"]',
+    text => /\bTB\b/i.test(text) && text.trim().length > 0,
+    120000
+  );
   console.log(`📋 Cost details:\n${tableText}`);
 
   // Verify expected unit and amount before confirming
@@ -777,9 +832,15 @@ async function purchaseData(page, context) {
   await page.click('button.uk-button-primary:has-text("Complete Purchase")');
   console.log('✅ Complete Purchase clicked — waiting for confirmation modal...');
 
-  // Wait for modal and click its primary confirm button
-  await page.waitForSelector('#confirm-purchase-modal button:has-text("I Agree")', { timeout: 10000 });
-  await page.click('#confirm-purchase-modal button:has-text("I Agree")');
+  // Wait for the modal to actually render its confirm action, instead of using
+  // a short fixed selector timeout that can fail when the portal is slow.
+  await waitForSelectorText(
+    page,
+    '#confirm-purchase-modal',
+    text => /I Agree/i.test(text),
+    120000
+  );
+  await page.locator('#confirm-purchase-modal button:has-text("I Agree")').first().click({ timeout: 120000 });
   console.log('✅ "I Agree" clicked in confirmation modal');
 
   // Wait for the portal to settle after the modal closes and purchase state updates.
@@ -1293,9 +1354,9 @@ async function uploadFile(page, excelFile) {
   if (!groupCreatedSuccessfully) {
     try {
       // ── 1. Open Create Group modal ───────────────────────────────────────
-      await page.waitForSelector('button[onclick*="OpenCreateGroupModal"]', { timeout: 15000 });
+      await waitForSelectorVisibleSmart(page, 'button[onclick*="OpenCreateGroupModal"]', 120000);
       await page.click('button[onclick*="OpenCreateGroupModal"]');
-      await page.waitForSelector('#create-group-name', { timeout: 15000 });
+      await waitForSelectorVisibleSmart(page, '#create-group-name', 120000);
       console.log('✅ Create Group modal opened');
 
       // ── 2. Group Name ────────────────────────────────────────────────────
@@ -1312,12 +1373,12 @@ async function uploadFile(page, excelFile) {
       console.log('✅ Upload Beneficiaries tab selected');
 
       // ── 5. Attach Excel file ─────────────────────────────────────────────
-      await page.waitForSelector('#group-beneficiaries-file', { timeout: 10000 });
+      await waitForSelectorVisibleSmart(page, '#group-beneficiaries-file', 120000);
       await page.setInputFiles('#group-beneficiaries-file', excelFile.fullPath);
       console.log('✅ File attached');
 
       // ── 6. Submit ────────────────────────────────────────────────────────
-      await page.waitForSelector('button.submit-btn', { timeout: 10000 });
+      await waitForSelectorVisibleSmart(page, 'button.submit-btn', 120000);
       await page.click('button.submit-btn');
       console.log('✅ Create Group submitted — waiting for response...');
 
@@ -1777,7 +1838,7 @@ async function run() {
       // ── Balance check — always fetch real balance (direct API, no navigation overhead) ──
       const { totalMB: currentBalanceMB } = await checkBalance(page, context);
       const purchaseStatusNow = loadStatusLog()._purchaseStatus;
-      if (currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS' && purchaseStatusNow !== 'WAITING_FUNDS') {
+      if (isAutoPurchaseEnabled() && currentBalanceMB <= 90 * 1024 && purchaseStatusNow !== 'IN_PROGRESS' && purchaseStatusNow !== 'WAITING_FUNDS') {
         console.log(`💳 Balance is ≤ 90 GB (${(currentBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase before scanning files...`);
         sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(currentBalanceMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
         updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
@@ -1824,7 +1885,7 @@ async function run() {
         // This ensures stock is replenished before the next batch of files arrives.
         {
           const idlePurchaseStatus = idleLog._purchaseStatus;
-          if (idleBalanceMB > 0 && idleBalanceMB <= 90 * 1024
+          if (isAutoPurchaseEnabled() && idleBalanceMB > 0 && idleBalanceMB <= 90 * 1024
               && idlePurchaseStatus !== 'IN_PROGRESS'
               && idlePurchaseStatus !== 'WAITING_FUNDS') {
             console.log(`💳 [Idle] Balance is ≤ 90 GB (${(idleBalanceMB / 1024).toFixed(2)} GB) — triggering auto-purchase while idle...`);
@@ -1890,7 +1951,7 @@ async function run() {
 
       // ── Check balance threshold before building batch ─────────────────────
       const purchaseStatusInLoop = loadStatusLog()._purchaseStatus;
-      if (availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS' && purchaseStatusInLoop !== 'WAITING_FUNDS') {
+      if (isAutoPurchaseEnabled() && availableMB <= AUTO_PURCHASE_THRESHOLD_MB && purchaseStatusInLoop !== 'IN_PROGRESS' && purchaseStatusInLoop !== 'WAITING_FUNDS') {
         console.log(`💳 Balance is ≤ 90 GB (${(availableMB / 1024).toFixed(2)} GB) — triggering auto-purchase before next batch...`);
         sendAlert('💳 MTN GroupShare — Auto-Purchase', `Balance dropped to ${(availableMB / 1024).toFixed(2)} GB. Purchasing 1.5 TB bundle.`);
         updateStatusLog({ _purchaseStatus: 'IN_PROGRESS' });
