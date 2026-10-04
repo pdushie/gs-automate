@@ -131,6 +131,16 @@ async function waitForSelectorVisibleSmart(page, selector, maxWaitMs = 120000) {
   throw new Error(`Timed out waiting for visible selector: ${selector} after ${Math.round(maxWaitMs / 1000)}s`);
 }
 
+function smartSliceMs(remainingMs, minMs = 5000, maxMs = 45000) {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return minMs;
+  return Math.max(minMs, Math.min(maxMs, Math.floor(remainingMs * 0.35)));
+}
+
+async function smartPauseMs(remainingMs) {
+  const delayMs = Math.max(1200, Math.min(8000, Math.floor(remainingMs * 0.08)));
+  await new Promise(r => setTimeout(r, delayMs));
+}
+
 async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
   const selector = 'input[name="DataBundle"]';
   const startedAt = Date.now();
@@ -204,26 +214,35 @@ async function gotoManageGroupsSmart(page, maxWaitMs = 180000) {
   while (Date.now() - startedAt < maxWaitMs) {
     try {
       if (!page.url().includes(targetPath)) {
-        await gotoWithRetry(page, `https://up2u.mtn.com.gh${targetPath}`, { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+        const remaining = maxWaitMs - (Date.now() - startedAt);
+        const gotoTimeoutMs = smartSliceMs(remaining, 15000, 120000);
+        await gotoWithRetry(page, `https://up2u.mtn.com.gh${targetPath}`, { waitUntil: 'domcontentloaded', timeout: gotoTimeoutMs }, 3);
       }
 
       const remaining = maxWaitMs - (Date.now() - startedAt);
-      await waitForManageGroupsReady(page, Math.max(15000, Math.min(remaining, 120000)));
+      await waitForManageGroupsReady(page, smartSliceMs(remaining, 12000, 120000));
       return;
     } catch (err) {
+      const remaining = maxWaitMs - (Date.now() - startedAt);
+      const onTargetAfterErr = page.url().includes(targetPath);
+      if (onTargetAfterErr) {
+        console.warn('⚠️  Manage-groups goto timed out but target URL is loaded — continuing with readiness checks...');
+      }
+
       if (!TRANSIENT_NAV_ERR.test(String(err.message || '')) && !String(err.message || '').includes('manage-groups')) {
         throw err;
       }
 
-      if (Date.now() - lastRecoveryAt > 30000) {
+      if (Date.now() - lastRecoveryAt > Math.max(8000, Math.min(30000, Math.floor(remaining * 0.2)))) {
         try {
           console.warn('⚠️  Manage-groups still not ready — reloading and retrying...');
-          await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 45000 }, 2);
+          const reloadTimeoutMs = smartSliceMs(remaining, 10000, 90000);
+          await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: reloadTimeoutMs }, 2);
         } catch {}
         lastRecoveryAt = Date.now();
       }
 
-      await new Promise(r => setTimeout(r, 3000));
+      await smartPauseMs(remaining);
     }
   }
 

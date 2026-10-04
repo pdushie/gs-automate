@@ -22,25 +22,25 @@ app.post('/otp', (req, res) => {
     JSON.stringify(req.body);
 
   if (!message) {
-    console.log('⚠️  Empty payload received');
-    return res.status(400).json({ error: 'Empty payload' });
+    console.log('ℹ️  Empty payload received — ignored');
+    return res.status(200).json({ received: true, accepted: false, note: 'Empty payload — ignored' });
   }
 
   // Only process messages that are actually MTN OTP messages
   const isMtnOtp = /MTN/i.test(message) && /OTP/i.test(message);
   if (!isMtnOtp) {
-    console.log('⚠️  Ignored — not an MTN OTP message:', message);
-    return res.status(200).json({ received: true, note: 'Not an MTN OTP message — ignored' });
+    console.log('ℹ️  Ignored — not an MTN OTP message:', message);
+    return res.status(200).json({ received: true, accepted: false, note: 'Not an MTN OTP message — ignored' });
   }
 
   // Extract OTP Code value specifically (e.g. "OTP Code: 41764126")
-  let match = message.match(/OTP\s*Code[:\s]+(\d{6,8})/i);
-  // Fallback: any standalone 6-8 digit number in the message
-  if (!match) match = message.match(/\b(\d{6,8})\b/);
+  let match = message.match(/OTP\s*Code\s*[:\-]?\s*(\d{4,10})/i);
+  // Fallback: any standalone 6-10 digit number in the message
+  if (!match) match = message.match(/\b(\d{6,10})\b/);
 
   if (!match) {
-    console.log('⚠️  MTN OTP message received but no OTP digits found:', message);
-    return res.status(400).json({ error: 'No OTP digits found in message' });
+    console.log('ℹ️  MTN OTP message received but no OTP digits found — ignored:', message);
+    return res.status(200).json({ received: true, accepted: false, note: 'MTN OTP message had no parseable OTP digits' });
   }
 
   const otp = match[1];
@@ -51,8 +51,8 @@ app.post('/otp', (req, res) => {
     otpResolve = null;
     return res.json({ success: true, otp });
   } else {
-    console.log('⚠️  OTP received but no script is currently waiting — discarding to avoid stale reuse');
-    return res.json({ received: true, note: 'No script waiting — OTP discarded' });
+    console.log('ℹ️  OTP received but no script is currently waiting — discarding to avoid stale reuse');
+    return res.json({ received: true, accepted: false, note: 'No script waiting — OTP discarded' });
   }
 });
 
