@@ -625,7 +625,10 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   // Hard queue depth enforcement — reject immediately if queue is full.
   // This is the authoritative gate; /balance is only a soft advisory signal.
   {
-    const pending  = getPendingFileCount();
+    // multer writes req.file into EXCEL_FOLDER_PATH before this check runs.
+    // Exclude that same file so a small max depth (e.g. 1) does not reject
+    // the upload as "queue full" because of its own presence.
+    const pending  = getPendingFileCount([req.file.filename, req.file.originalname]);
     const maxDepth = getQueueMaxDepth();
     if (pending >= maxDepth) {
       // Delete the file multer already wrote to disk before rejecting
@@ -1056,15 +1059,17 @@ function getQueueMaxDepth() {
   return acctCount > 0 ? acctCount * 2 : 4;
 }
 
-function getPendingFileCount() {
+function getPendingFileCount(excludeNames = []) {
   const folderPath = process.env.EXCEL_FOLDER_PATH;
   if (!folderPath || !fs.existsSync(folderPath)) return 0;
   try {
     const uploaded  = loadUploadedLog();
     const statusLog = loadStatusLog();
+    const excludeSet = new Set((excludeNames || []).map(n => String(n || '').replace(/\\/g, '/')));
     const PENDING_STATES = new Set(['PENDING', 'TIMEOUT', 'IN_PROGRESS', 'PROCESSING']);
     return listFilesRecursive(folderPath)
       .filter(f => isSpreadsheetFile(f.fullPath))
+      .filter(f => !excludeSet.has(f.name))
       .filter(f => PENDING_STATES.has(resolveFileStatus(f.name, uploaded, statusLog).status))
       .length;
   } catch {

@@ -130,6 +130,48 @@ async function waitForSelectorVisibleSmart(page, selector, maxWaitMs = 120000) {
   }
   throw new Error(`Timed out waiting for visible selector: ${selector} after ${Math.round(maxWaitMs / 1000)}s`);
 }
+
+async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
+  const selector = 'input[name="DataBundle"]';
+  const startedAt = Date.now();
+  let lastRecoveryAt = 0;
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    const currentUrl = page.url();
+    if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
+      throw new Error(`Redirected to auth page while waiting for purchase form: ${currentUrl}`);
+    }
+
+    const visibleNow = await page.locator(selector).first().isVisible().catch(() => false);
+    if (visibleNow) return;
+
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const sliceMs = Math.min(15000, remaining);
+    try {
+      await Promise.race([
+        page.waitForSelector(selector, { state: 'visible', timeout: sliceMs }),
+        page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { state: 'visible', timeout: sliceMs }),
+      ]);
+    } catch {
+      // Keep polling until max wait is exceeded.
+    }
+
+    const visibleAfterWait = await page.locator(selector).first().isVisible().catch(() => false);
+    if (visibleAfterWait) return;
+
+    // Recovery for slow/stale UI state: periodic lightweight reload while
+    // staying on the same purchase page.
+    if (Date.now() - lastRecoveryAt > 30000) {
+      try {
+        console.warn('⚠️  Purchase form still not visible — reloading purchase page and retrying...');
+        await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 45000 }, 2);
+      } catch {}
+      lastRecoveryAt = Date.now();
+    }
+  }
+
+  throw new Error(`Timed out waiting for purchase form selector: ${selector} after ${Math.round(maxWaitMs / 1000)}s`);
+}
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
@@ -789,7 +831,7 @@ async function purchaseData(page, context) {
   console.log(`✅ Balance sufficient — proceeding with purchase`);
 
   // Set Data bundle value to 1.5 via Kendo NumericTextBox API
-  await waitForSelectorVisibleSmart(page, 'input[name="DataBundle"]', 120000);
+  await waitForPurchaseFormReady(page, 180000);
   await page.evaluate(() => {
     const input = document.querySelector('input[name="DataBundle"]');
     const widget = kendo.widgetInstance(jQuery(input));
