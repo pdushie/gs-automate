@@ -141,7 +141,7 @@ async function smartPauseMs(remainingMs) {
   await new Promise(r => setTimeout(r, delayMs));
 }
 
-async function clickCreateGroupSubmitSmart(page, maxWaitMs = 240000) {
+async function clickCreateGroupSubmitSmart(page, maxWaitMs = 360000) {
   const startedAt = Date.now();
   let lastRecoveryAt = 0;
   const selectors = [
@@ -186,6 +186,42 @@ async function clickCreateGroupSubmitSmart(page, maxWaitMs = 240000) {
       }
     }
 
+    const jsFallbackAction = await page.evaluate(() => {
+      const modal = document.querySelector('#create-group-modal, .uk-modal.uk-open, .uk-open .uk-modal-dialog') || document;
+      const elems = Array.from(modal.querySelectorAll('button, input[type="submit"], input[type="button"]'));
+
+      const enabledMatch = elems.find(el => {
+        const text = ((el.textContent || el.value || '') + ' ' + (el.id || '') + ' ' + (el.className || '')).toLowerCase();
+        const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+        const disabled = Boolean(el.disabled) || aria === 'true';
+        return !disabled && /(create|submit|save|done|continue)/i.test(text);
+      });
+
+      if (enabledMatch) {
+        enabledMatch.click();
+        return 'js-click:enabled-match';
+      }
+
+      const form = modal.querySelector('form');
+      if (form) {
+        if (typeof form.reportValidity === 'function' && !form.reportValidity()) {
+          return 'form-invalid';
+        }
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit();
+          return 'form-requestSubmit';
+        }
+        form.submit();
+        return 'form-submit';
+      }
+
+      return 'no-js-fallback';
+    }).catch(() => 'no-js-fallback');
+
+    if (jsFallbackAction !== 'no-js-fallback' && jsFallbackAction !== 'form-invalid') {
+      return jsFallbackAction;
+    }
+
     const recoveryWindowMs = Math.max(10000, Math.min(30000, Math.floor(remaining * 0.2)));
     if (Date.now() - lastRecoveryAt > recoveryWindowMs) {
       try {
@@ -194,13 +230,47 @@ async function clickCreateGroupSubmitSmart(page, maxWaitMs = 240000) {
       try {
         await page.waitForSelector('#create-group-name', { state: 'visible', timeout: Math.min(sliceMs, 12000) });
       } catch {}
+
+      const modalState = await page.evaluate(() => {
+        const getVal = (sel) => {
+          const el = document.querySelector(sel);
+          return el ? String(el.value || '').trim() : '';
+        };
+        const fileInput = document.querySelector('#group-beneficiaries-file');
+        const fileCount = fileInput && fileInput.files ? fileInput.files.length : 0;
+        const enabledSubmitButtons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'))
+          .filter(el => {
+            const text = ((el.textContent || el.value || '') + ' ' + (el.id || '') + ' ' + (el.className || '')).toLowerCase();
+            const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+            const disabled = Boolean(el.disabled) || aria === 'true';
+            return !disabled && /(create|submit|save|done|continue)/i.test(text);
+          })
+          .slice(0, 3)
+          .map(el => (el.textContent || el.value || el.id || 'button').trim());
+        return {
+          groupNameLen: getVal('#create-group-name').length,
+          dataValue: getVal('#create-group-data'),
+          fileCount,
+          enabledSubmitButtons,
+        };
+      }).catch(() => null);
+      if (modalState) {
+        console.warn(`⚠️  Create Group modal state — nameLen=${modalState.groupNameLen}, data=${modalState.dataValue || 'n/a'}, files=${modalState.fileCount}, enabledSubmit=${(modalState.enabledSubmitButtons || []).join(' | ') || 'none'}`);
+      }
+
       lastRecoveryAt = Date.now();
     }
 
     await smartPauseMs(remaining);
   }
 
-  throw new Error('Timed out waiting for an enabled Create Group submit control in modal');
+  const timeoutState = await page.evaluate(() => {
+    const fileInput = document.querySelector('#group-beneficiaries-file');
+    const fileCount = fileInput && fileInput.files ? fileInput.files.length : 0;
+    const hasModal = Boolean(document.querySelector('#create-group-modal, .uk-modal.uk-open, .uk-open .uk-modal-dialog'));
+    return { hasModal, fileCount };
+  }).catch(() => ({ hasModal: false, fileCount: 0 }));
+  throw new Error(`Timed out waiting for a Create Group submit path in modal (hasModal=${timeoutState.hasModal}, fileCount=${timeoutState.fileCount})`);
 }
 
 async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
@@ -1654,10 +1724,14 @@ async function uploadFile(page, excelFile) {
       // ── 5. Attach Excel file ─────────────────────────────────────────────
       await waitForSelectorVisibleSmart(page, '#group-beneficiaries-file', 120000);
       await page.setInputFiles('#group-beneficiaries-file', excelFile.fullPath);
+      await page.waitForFunction(() => {
+        const fi = document.querySelector('#group-beneficiaries-file');
+        return !!fi && !!fi.files && fi.files.length > 0;
+      }, null, { timeout: 120000 });
       console.log('✅ File attached');
 
       // ── 6. Submit ────────────────────────────────────────────────────────
-      const submitAction = await clickCreateGroupSubmitSmart(page, 240000);
+      const submitAction = await clickCreateGroupSubmitSmart(page, 360000);
       console.log(`✅ Create Group submit action: ${submitAction}`);
       console.log('✅ Create Group submitted — waiting for response...');
 
