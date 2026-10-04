@@ -26,7 +26,7 @@ const IDLE_REFRESH_INTERVAL = 25 * 1000;
 // Transient network error patterns — these are portal/connection blips, not code bugs.
 // Transient network / navigation error patterns — portal blips and Playwright
 // navigation timeouts are both retriable; only logic/auth errors are fatal.
-const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::|Timeout.*exceeded/i;
+const TRANSIENT_NAV_ERR = /ERR_EMPTY_RESPONSE|ERR_CONNECTION_RESET|ERR_CONNECTION_REFUSED|ERR_NAME_NOT_RESOLVED|ERR_TIMED_OUT|ERR_INTERNET_DISCONNECTED|net::|Timeout.*exceeded|OTP page not ready after/i;
 
 // page.goto with automatic retry on transient network errors (up to maxRetries attempts).
 async function gotoWithRetry(page, url, opts, maxRetries = 3) {
@@ -171,6 +171,63 @@ async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
   }
 
   throw new Error(`Timed out waiting for purchase form selector: ${selector} after ${Math.round(maxWaitMs / 1000)}s`);
+}
+
+async function waitForManageGroupsReady(page, maxWaitMs = 180000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    const url = page.url();
+    if (url.includes('/account/login') || url.includes('/account/verify-otp')) {
+      throw new Error(`Redirected to auth page while waiting for manage-groups: ${url}`);
+    }
+
+    const manageVisible = await page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first().isVisible().catch(() => false);
+    if (manageVisible) return;
+
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const sliceMs = Math.min(15000, remaining);
+    try {
+      await page.waitForSelector('button[aria-haspopup="true"]', { state: 'visible', timeout: sliceMs });
+      return;
+    } catch {
+      // Keep polling until maxWaitMs expires.
+    }
+  }
+  throw new Error(`Timed out waiting for manage-groups UI after ${Math.round(maxWaitMs / 1000)}s`);
+}
+
+async function gotoManageGroupsSmart(page, maxWaitMs = 180000) {
+  const targetPath = '/beneficiaries/manage-groups';
+  const startedAt = Date.now();
+  let lastRecoveryAt = 0;
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    try {
+      if (!page.url().includes(targetPath)) {
+        await gotoWithRetry(page, `https://up2u.mtn.com.gh${targetPath}`, { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
+      }
+
+      const remaining = maxWaitMs - (Date.now() - startedAt);
+      await waitForManageGroupsReady(page, Math.max(15000, Math.min(remaining, 120000)));
+      return;
+    } catch (err) {
+      if (!TRANSIENT_NAV_ERR.test(String(err.message || '')) && !String(err.message || '').includes('manage-groups')) {
+        throw err;
+      }
+
+      if (Date.now() - lastRecoveryAt > 30000) {
+        try {
+          console.warn('⚠️  Manage-groups still not ready — reloading and retrying...');
+          await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 45000 }, 2);
+        } catch {}
+        lastRecoveryAt = Date.now();
+      }
+
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+
+  throw new Error(`Timed out navigating to manage-groups after ${Math.round(maxWaitMs / 1000)}s`);
 }
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
@@ -553,9 +610,12 @@ async function isSessionActive(page) {
 async function login(page) {
   const maxSubmitAttempts = 3;
   const OTP_INPUT_SELECTOR = 'input[type="password"][name="OTPCode"], input[name="OTPCode"]';
+  const OTP_PAGE_READY_MAX_WAIT_MS = Math.max(120000, parseInt(process.env.OTP_PAGE_READY_MAX_WAIT_MS || '300000', 10));
 
-  async function waitForOtpPageReady(maxWaitMs = 180000) {
+  async function waitForOtpPageReady(maxWaitMs = OTP_PAGE_READY_MAX_WAIT_MS) {
     const startedAt = Date.now();
+    let lastRecoveryAt = 0;
+    let recoveryCount = 0;
 
     while (Date.now() - startedAt < maxWaitMs) {
       const remaining = maxWaitMs - (Date.now() - startedAt);
@@ -582,6 +642,32 @@ async function login(page) {
 
       const otpVisibleAfterRace = await page.locator(OTP_INPUT_SELECTOR).first().isVisible().catch(() => false);
       if (page.url().includes('/account/verify-otp') && otpVisibleAfterRace) return;
+
+      const now = Date.now();
+      if (now - lastRecoveryAt >= 30000) {
+        lastRecoveryAt = now;
+        recoveryCount += 1;
+        const currentUrl = page.url();
+        console.warn(`⚠️  OTP page not ready yet (${Math.round((now - startedAt) / 1000)}s elapsed) — recovery ${recoveryCount}`);
+
+        // Recover in-place first; only navigate when clearly not progressing.
+        if (currentUrl.includes('/account/login')) {
+          try {
+            await clickLoginButton(`otp-ready-recovery-${recoveryCount}`);
+          } catch (recoveryErr) {
+            console.warn(`⚠️  OTP recovery login-click failed: ${recoveryErr.message}`);
+          }
+        } else if (currentUrl.includes('up2u.mtn.com.gh') && !currentUrl.includes('/account/verify-otp')) {
+          try {
+            await gotoWithRetry(page, 'https://up2u.mtn.com.gh/account/verify-otp', {
+              waitUntil: 'domcontentloaded',
+              timeout: 240000,
+            }, 2);
+          } catch (recoveryErr) {
+            console.warn(`⚠️  OTP recovery navigation failed: ${recoveryErr.message}`);
+          }
+        }
+      }
     }
 
     throw new Error(`OTP page not ready after ${Math.round(maxWaitMs / 1000)}s`);
@@ -678,7 +764,7 @@ async function login(page) {
       console.log(`📸 Screenshot saved — ${loginCredsShot}`);
       await clickLoginButton('credentials');
       console.log('🚀 Login clicked');
-      await waitForOtpPageReady();
+      await waitForOtpPageReady(OTP_PAGE_READY_MAX_WAIT_MS);
     }
 
     // ── Phase 2+3: For each attempt, wait for OTP FIRST then submit ────────
@@ -1372,8 +1458,7 @@ async function uploadFile(page, excelFile) {
   }
 
   // ── Navigate to Manage Groups ─────────────────────────────────────────────
-  await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
-  await page.waitForSelector('button[aria-haspopup="true"]', { state: 'visible', timeout: 120000 });
+  await gotoManageGroupsSmart(page, 240000);
   _lastPortalNavAt = Date.now();
 
   // ── Recovery: check if group already exists from a prior failed attempt ────
@@ -1804,8 +1889,7 @@ async function run() {
         updateStatusLog({ _debugNavBeneficiaries: false });
         console.log(`🐛 [DEBUG] Navigating to manage-groups for View Beneficiaries test${debugFileName ? ` (file: "${debugFileName}")` : ' (first row)'}...`);
         try {
-          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/beneficiaries/manage-groups', { waitUntil: 'domcontentloaded', timeout: 45000 }, 3);
-          await page.waitForSelector('button[aria-haspopup="true"]', { state: 'visible', timeout: 900000 });
+          await gotoManageGroupsSmart(page, 900000);
           console.log('🐛 [DEBUG] manage-groups loaded — saving screenshot...');
           await page.screenshot({ path: 'debug-manage-groups.png', fullPage: true, timeout: 180000 });
           console.log('📸 Screenshot saved — debug-manage-groups.png');

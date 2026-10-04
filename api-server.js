@@ -494,6 +494,28 @@ function getFileTotalMBFromBuffer(buffer) {
   }
 }
 
+function getExcelStatsFromBuffer(buffer) {
+  try {
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rawRows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+    const DATA_MB_COL = 3; // column 4 (0-indexed)
+    let totalMB = 0;
+    let rowCount = 0;
+    for (let r = 1; r < rawRows.length; r++) {
+      const val = parseFloat(rawRows[r][DATA_MB_COL]) || 0;
+      if (val > 0) { totalMB += val; rowCount++; }
+    }
+    return {
+      totalMB,
+      totalDataGB: parseFloat((totalMB / 1024).toFixed(4)),
+      rowCount,
+    };
+  } catch {
+    return { totalMB: 0, totalDataGB: null, rowCount: null };
+  }
+}
+
 
 
 
@@ -654,14 +676,27 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
       const uploadOrderIds = coerceOrderIds(req.body?.orderIds);
       const orderMeta = { _fileReceived: true };
+      const extracted = [];
       for (const file of extractedFiles) {
+        const stats = getExcelStats(file.fullPath);
+        const stat = fs.statSync(file.fullPath);
         orderMeta[`${file.name}_queuedAt`] = queuedAt;
         orderMeta[`${file.name}_isZipExtracted`] = true; // never merge with other files
+        if (stats.totalDataGB != null) {
+          orderMeta[`${file.name}_totalMB`] = Math.round(stats.totalDataGB * 1024);
+          orderMeta[`${file.name}_rowCount`] = stats.rowCount;
+          orderMeta[`${file.name}_totalMB_mtime`] = stat.mtime.toISOString();
+        }
         if (uploadOrderIds) {
           orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
         } else if (req.body?.orderId) {
           orderMeta[`${file.name}_orderId`] = req.body.orderId;
         }
+        extracted.push({
+          filename: file.name,
+          totalDataGB: stats.totalDataGB,
+          rowCount: stats.rowCount,
+        });
       }
 
       withFileLock(STATUS_LOG, () => {
@@ -676,7 +711,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
         filename: req.file.originalname,
         folder: path.basename(zipFolder),
         queuedAt,
-        extractedFiles: extractedFiles.map(f => f.name),
+        extractedFiles: extracted,
       });
     } catch (err) {
       console.error(`❌ Failed to extract zip archive "${req.file.originalname}": ${err.message}`);
@@ -697,9 +732,18 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     console.warn(`⚠️ File queued but allocation (${requiredGB} GB) exceeds current balance (${availableGB} GB) — will process when balance is topped up`);
   }
 
+  const uploadStats = getExcelStats(req.file.path);
+  const uploadStat = fs.statSync(req.file.path);
+
   withFileLock(STATUS_LOG, () => {
     const log = loadStatusLog();
-    saveStatusLog({ ...log, _fileReceived: true, [`${req.file.filename}_queuedAt`]: queuedAt });
+    const updates = { _fileReceived: true, [`${req.file.filename}_queuedAt`]: queuedAt };
+    if (uploadStats.totalDataGB != null) {
+      updates[`${req.file.filename}_totalMB`] = Math.round(uploadStats.totalDataGB * 1024);
+      updates[`${req.file.filename}_rowCount`] = uploadStats.rowCount;
+      updates[`${req.file.filename}_totalMB_mtime`] = uploadStat.mtime.toISOString();
+    }
+    saveStatusLog({ ...log, ...updates });
   });
   console.log(`📥 API received file: ${req.file.filename}`);
   res.json({
@@ -707,6 +751,8 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     message: 'File queued for processing',
     filename: req.file.filename,
     queuedAt,
+    totalDataGB: uploadStats.totalDataGB,
+    rowCount: uploadStats.rowCount,
   });
 });
 
@@ -767,14 +813,27 @@ app.post('/upload-base64', async (req, res) => {
 
       const uploadOrderIds = coerceOrderIds(orderIds);
       const orderMeta = { _fileReceived: true };
+      const extracted = [];
       for (const file of extractedFiles) {
+        const stats = getExcelStats(file.fullPath);
+        const stat = fs.statSync(file.fullPath);
         orderMeta[`${file.name}_queuedAt`] = queuedAt;
         orderMeta[`${file.name}_isZipExtracted`] = true; // never merge with other files
+        if (stats.totalDataGB != null) {
+          orderMeta[`${file.name}_totalMB`] = Math.round(stats.totalDataGB * 1024);
+          orderMeta[`${file.name}_rowCount`] = stats.rowCount;
+          orderMeta[`${file.name}_totalMB_mtime`] = stat.mtime.toISOString();
+        }
         if (uploadOrderIds) {
           orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
         } else if (orderId) {
           orderMeta[`${file.name}_orderId`] = orderId;
         }
+        extracted.push({
+          filename: file.name,
+          totalDataGB: stats.totalDataGB,
+          rowCount: stats.rowCount,
+        });
       }
 
       withFileLock(STATUS_LOG, () => {
@@ -789,15 +848,23 @@ app.post('/upload-base64', async (req, res) => {
         filename: filename,
         folder: path.basename(zipFolder),
         queuedAt,
-        extractedFiles: extractedFiles.map(f => f.name),
+        extractedFiles: extracted,
       });
     }
 
     fs.writeFileSync(savePath, buffer);
     console.log(`📥 API received base64 file: ${savedName}`);
 
+    const statsFromBuffer = getExcelStatsFromBuffer(buffer);
+
     // Persist order reference(s) and wake the idle bot
     const orderMeta = { _fileReceived: true, [`${savedName}_queuedAt`]: queuedAt };
+    if (statsFromBuffer.totalDataGB != null) {
+      const stat = fs.statSync(savePath);
+      orderMeta[`${savedName}_totalMB`] = Math.round(statsFromBuffer.totalDataGB * 1024);
+      orderMeta[`${savedName}_rowCount`] = statsFromBuffer.rowCount;
+      orderMeta[`${savedName}_totalMB_mtime`] = stat.mtime.toISOString();
+    }
     if (Array.isArray(orderIds) && orderIds.length > 0) {
       orderMeta[`${savedName}_orderIds`] = orderIds;
     } else if (orderId) {
@@ -815,6 +882,8 @@ app.post('/upload-base64', async (req, res) => {
       message: 'File queued for processing',
       filename: savedName,
       queuedAt,
+      totalDataGB: statsFromBuffer.totalDataGB,
+      rowCount: statsFromBuffer.rowCount,
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
