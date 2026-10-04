@@ -674,24 +674,95 @@ async function login(page) {
   }
 
   async function clickLoginButton(stepTag = 'submit') {
-    const loginBtn = page.locator('#login-btn').first();
-    try {
-      await loginBtn.waitFor({ state: 'visible', timeout: 20000 });
-      await loginBtn.scrollIntoViewIfNeeded();
-      await loginBtn.click({ timeout: 10000 });
-    } catch (clickErr) {
-      console.warn(`⚠️  Login button click() failed: ${clickErr.message} — trying dispatchEvent fallback`);
+    const selectors = [
+      '#login-btn',
+      'button[type="submit"]',
+      'button:has-text("Login")',
+      'input[type="submit"][value*="Login"]',
+    ];
+
+    let clicked = false;
+    let lastErr = null;
+
+    for (const selector of selectors) {
+      if (clicked) break;
+      const btn = page.locator(selector).first();
+      try {
+        await btn.waitFor({ state: 'visible', timeout: 12000 });
+        await btn.scrollIntoViewIfNeeded();
+
+        const disabled = await btn.evaluate(el => {
+          const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+          return Boolean(el.disabled) || aria === 'true';
+        }).catch(() => false);
+
+        if (disabled) {
+          console.warn(`⚠️  Login button (${selector}) is disabled — waiting briefly`);
+          await page.waitForTimeout(1500);
+        }
+
+        try {
+          await btn.click({ timeout: 12000 });
+        } catch (normalClickErr) {
+          console.warn(`⚠️  Login click failed on ${selector}: ${normalClickErr.message} — trying force click`);
+          await btn.click({ timeout: 8000, force: true });
+        }
+
+        clicked = true;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+
+    if (!clicked) {
+      const msg = lastErr?.message || 'unknown reason';
+      console.warn(`⚠️  Login button click() failed: ${msg} — trying dispatchEvent fallback`);
       try {
         await page.dispatchEvent('#login-btn', 'click');
       } catch {
-        await page.evaluate(() => {
-          const byId = document.querySelector('#login-btn');
-          const byText = Array.from(document.querySelectorAll('button'))
-            .find(b => /\bLogin\b/i.test((b.textContent || '').trim()));
-          const btn = byId || byText;
-          if (!btn) throw new Error('Login button not found');
-          btn.click();
+        const fallbackAction = await page.evaluate(() => {
+          const buttonCandidates = [
+            '#login-btn',
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button[name*="login" i]',
+            'button[id*="login" i]',
+            'input[type="button"][value*="login" i]',
+            'input[type="submit"][value*="login" i]',
+          ];
+
+          for (const sel of buttonCandidates) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            el.click();
+            return `clicked:${sel}`;
+          }
+
+          const byText = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"]'))
+            .find(el => /\blogin\b/i.test((el.textContent || el.value || '').trim()));
+          if (byText) {
+            byText.click();
+            return 'clicked:text-match';
+          }
+
+          const form = document.querySelector('form');
+          if (form) {
+            if (typeof form.requestSubmit === 'function') {
+              form.requestSubmit();
+            } else {
+              form.submit();
+            }
+            return 'submitted:form';
+          }
+
+          return 'noop:no-button-no-form';
         });
+        if (fallbackAction === 'noop:no-button-no-form') {
+          await page.keyboard.press('Enter').catch(() => {});
+          console.warn('⚠️  Login fallback used Enter key (no button/form found)');
+        } else {
+          console.log(`ℹ️  Login fallback action: ${fallbackAction}`);
+        }
       }
     }
 
