@@ -1735,22 +1735,56 @@ async function uploadFile(page, excelFile) {
       console.log(`✅ Create Group submit action: ${submitAction}`);
       console.log('✅ Create Group submitted — waiting for response...');
 
-      // ── 7. Detect success or failure notification ────────────────────────
-      const outcome = await Promise.race([
-        page.waitForSelector(
-          '.uk-notification-message-success, .uk-notification-message[class*="success"]',
-          { timeout: 120000 }
-        ).then(() => 'success'),
-        page.waitForSelector(
-          '.uk-notification-message-danger, .uk-notification-message[class*="danger"], .uk-alert-danger',
-          { timeout: 120000 }
-        ).then(async (el) => {
-          const msg = await el.evaluate(e => e.textContent.trim()).catch(() => '');
-          return { type: 'error', msg };
-        }),
-      ]);
+      const verifyGroupExistsAfterSubmit = async () => {
+        try {
+          await gotoManageGroupsSmart(page, 120000);
+        } catch {}
 
-      if (outcome === 'success') {
+        try {
+          await waitForManageGroupsReady(page, 90000);
+        } catch {}
+
+        return await page.evaluate((name) => {
+          for (const row of document.querySelectorAll('tr.k-master-row, tbody tr')) {
+            if ((row.textContent || '').includes(name)) return true;
+          }
+          return false;
+        }, groupName).catch(() => false);
+      };
+
+      // ── 7. Detect success or failure notification ────────────────────────
+      let outcome = null;
+      try {
+        outcome = await Promise.race([
+          page.waitForSelector(
+            '.uk-notification-message-success, .uk-notification-message[class*="success"]',
+            { timeout: 120000 }
+          ).then(() => 'success'),
+          page.waitForSelector(
+            '.uk-notification-message-danger, .uk-notification-message[class*="danger"], .uk-alert-danger',
+            { timeout: 120000 }
+          ).then(async (el) => {
+            const msg = await el.evaluate(e => e.textContent.trim()).catch(() => '');
+            return { type: 'error', msg };
+          }),
+        ]);
+      } catch (notifyErr) {
+        const timedOutWaitingToast = /waitForSelector:\s*Timeout/i.test(String(notifyErr.message || ''));
+        if (!timedOutWaitingToast) throw notifyErr;
+
+        console.warn('⚠️  No portal notification appeared after Create Group submit — verifying group existence on page...');
+        const existsAfterSubmit = await verifyGroupExistsAfterSubmit();
+        if (existsAfterSubmit) {
+          console.log(`ℹ️  Group "${groupName}" exists after submit despite missing toast — treating as DONE`);
+          groupCreatedSuccessfully = true;
+        } else {
+          throw new Error('No success/error notification after submit and group not found in Manage Groups');
+        }
+      }
+
+      if (groupCreatedSuccessfully) {
+        // Existence verification already confirmed successful creation.
+      } else if (outcome === 'success') {
         console.log('✅ Portal confirmed group created');
         groupCreatedSuccessfully = true;
       } else {
