@@ -141,6 +141,68 @@ async function smartPauseMs(remainingMs) {
   await new Promise(r => setTimeout(r, delayMs));
 }
 
+async function clickCreateGroupSubmitSmart(page, maxWaitMs = 240000) {
+  const startedAt = Date.now();
+  let lastRecoveryAt = 0;
+  const selectors = [
+    'button.submit-btn',
+    '#create-group-modal button[type="submit"]',
+    '#create-group-modal button.uk-button-primary',
+    '#create-group-modal button:has-text("Create Group")',
+    '#create-group-modal button:has-text("Submit")',
+  ];
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const sliceMs = smartSliceMs(remaining, 6000, 25000);
+
+    const alreadyNotified = await page.locator(
+      '.uk-notification-message-success, .uk-notification-message[class*="success"], .uk-notification-message-danger, .uk-notification-message[class*="danger"], .uk-alert-danger'
+    ).first().isVisible().catch(() => false);
+    if (alreadyNotified) return 'already-notified';
+
+    for (const selector of selectors) {
+      const btn = page.locator(selector).first();
+      const visible = await btn.isVisible().catch(() => false);
+      if (!visible) continue;
+
+      const disabled = await btn.evaluate(el => {
+        const aria = (el.getAttribute('aria-disabled') || '').toLowerCase();
+        return Boolean(el.disabled) || aria === 'true';
+      }).catch(() => true);
+      if (disabled) continue;
+
+      try {
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ timeout: sliceMs });
+        return `clicked:${selector}`;
+      } catch (clickErr) {
+        try {
+          await btn.click({ timeout: Math.max(2000, Math.floor(sliceMs * 0.6)), force: true });
+          return `force-clicked:${selector}`;
+        } catch {
+          console.warn(`⚠️  Create Group submit click failed on ${selector}: ${clickErr.message}`);
+        }
+      }
+    }
+
+    const recoveryWindowMs = Math.max(10000, Math.min(30000, Math.floor(remaining * 0.2)));
+    if (Date.now() - lastRecoveryAt > recoveryWindowMs) {
+      try {
+        await page.click('a[data-mode="upload"]', { timeout: Math.min(sliceMs, 8000) });
+      } catch {}
+      try {
+        await page.waitForSelector('#create-group-name', { state: 'visible', timeout: Math.min(sliceMs, 12000) });
+      } catch {}
+      lastRecoveryAt = Date.now();
+    }
+
+    await smartPauseMs(remaining);
+  }
+
+  throw new Error('Timed out waiting for an enabled Create Group submit control in modal');
+}
+
 async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
   const selector = 'input[name="DataBundle"]';
   const startedAt = Date.now();
@@ -1595,8 +1657,8 @@ async function uploadFile(page, excelFile) {
       console.log('✅ File attached');
 
       // ── 6. Submit ────────────────────────────────────────────────────────
-      await waitForSelectorVisibleSmart(page, 'button.submit-btn', 120000);
-      await page.click('button.submit-btn');
+      const submitAction = await clickCreateGroupSubmitSmart(page, 240000);
+      console.log(`✅ Create Group submit action: ${submitAction}`);
       console.log('✅ Create Group submitted — waiting for response...');
 
       // ── 7. Detect success or failure notification ────────────────────────
