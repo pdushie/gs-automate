@@ -1155,44 +1155,63 @@ async function login(page) {
     if (page.url().includes('/account/verify-otp')) {
       console.log('✅ Already on OTP page — skipping credential submission');
     } else {
-      // Some portal renders need a real click, others only respond to a
-      // programmatic event. Try both before failing.
-      await page.waitForSelector('#disclaimer-btn', { state: 'attached', timeout: 60000 });
-      const disclaimerBtn = page.locator('#disclaimer-btn');
-      try {
-        await disclaimerBtn.waitFor({ state: 'visible', timeout: 20000 });
-        await disclaimerBtn.scrollIntoViewIfNeeded();
-        await disclaimerBtn.click({ timeout: 10000 });
-      } catch (clickErr) {
-        console.warn(`⚠️  Disclaimer click() failed: ${clickErr.message} — trying dispatchEvent fallback`);
-        try {
-          await page.dispatchEvent('#disclaimer-btn', 'click');
-        } catch {
-          await page.evaluate(() => {
-            const byId = document.querySelector('#disclaimer-btn');
-            const byText = Array.from(document.querySelectorAll('button'))
-              .find(b => /I\s*Agree,\s*Continue/i.test((b.textContent || '').trim()));
-            const btn = byId || byText;
-            if (!btn) throw new Error('Disclaimer button not found');
-            btn.click();
-          });
-        }
-      }
-      console.log('✅ Disclaimer accepted');
+      const DISCLAIMER_SELECTOR = '#disclaimer-btn';
+      const MSISDN_SELECTOR = 'input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]';
+      const PIN_SELECTOR = 'input[type="password"][name="Pin"], input[name="Pin"]';
 
-      await page.waitForSelector('input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]', {
+      // Some portal renders need a real click, others only respond to a
+      // programmatic event. Some sessions skip the disclaimer and show login
+      // fields directly, so wait for either state and continue accordingly.
+      let loginFieldsReady = await page.locator(MSISDN_SELECTOR).first().isVisible().catch(() => false);
+      if (!loginFieldsReady) {
+        try {
+          await Promise.race([
+            page.waitForSelector(DISCLAIMER_SELECTOR, { state: 'attached', timeout: 90000 }),
+            page.waitForSelector(MSISDN_SELECTOR, { state: 'visible', timeout: 90000 }),
+          ]);
+        } catch {}
+        loginFieldsReady = await page.locator(MSISDN_SELECTOR).first().isVisible().catch(() => false);
+      }
+
+      const disclaimerVisible = await page.locator(DISCLAIMER_SELECTOR).first().isVisible().catch(() => false);
+      if (disclaimerVisible && !loginFieldsReady) {
+        const disclaimerBtn = page.locator(DISCLAIMER_SELECTOR).first();
+        try {
+          await disclaimerBtn.scrollIntoViewIfNeeded();
+          await disclaimerBtn.click({ timeout: 10000 });
+        } catch (clickErr) {
+          console.warn(`⚠️  Disclaimer click() failed: ${clickErr.message} — trying dispatchEvent fallback`);
+          try {
+            await page.dispatchEvent(DISCLAIMER_SELECTOR, 'click');
+          } catch {
+            await page.evaluate(() => {
+              const byId = document.querySelector('#disclaimer-btn');
+              const byText = Array.from(document.querySelectorAll('button'))
+                .find(b => /I\s*Agree,\s*Continue/i.test((b.textContent || '').trim()));
+              const btn = byId || byText;
+              if (!btn) throw new Error('Disclaimer button not found');
+              btn.click();
+            });
+          }
+        }
+        console.log('✅ Disclaimer accepted');
+      } else {
+        console.log('ℹ️  Disclaimer not required/visible — continuing to login fields');
+      }
+
+      await page.waitForSelector(MSISDN_SELECTOR, {
         state: 'visible',
-        timeout: 30000,
+        timeout: 120000,
       });
-      const msisdnInput = page.locator('input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]').first();
+      const msisdnInput = page.locator(MSISDN_SELECTOR).first();
       await msisdnInput.click({ timeout: 10000 });
       await msisdnInput.fill('');
       await msisdnInput.fill((process.env.MTN_PHONE || '').trim());
-      await page.waitForSelector('input[type="password"][name="Pin"], input[name="Pin"]', {
+      await page.waitForSelector(PIN_SELECTOR, {
         state: 'visible',
-        timeout: 30000,
+        timeout: 120000,
       });
-      const pinInput = page.locator('input[type="password"][name="Pin"], input[name="Pin"]').first();
+      const pinInput = page.locator(PIN_SELECTOR).first();
       await pinInput.click({ timeout: 10000 });
       await pinInput.fill('');
       await pinInput.fill((process.env.MTN_PIN || '').trim());
@@ -1936,15 +1955,15 @@ async function uploadFile(page, excelFile) {
       return false;
     }, groupName);
     if (alreadyExists) {
-      console.log(`ℹ️  Group "${groupName}" already exists on Manage Groups — treating as DONE (recovery)`);
+      console.log(`ℹ️  Group "${groupName}" already exists on Manage Groups — skipping create modal and continuing with share/status workflow (recovery)`);
       groupCreatedSuccessfully = true;
     }
   } catch (checkErr) {
     console.warn(`⚠️  Pre-flight group existence check failed: ${checkErr.message}`);
   }
 
-  if (!groupCreatedSuccessfully) {
-    try {
+  try {
+    if (!groupCreatedSuccessfully) {
       // ── 1. Open Create Group modal ───────────────────────────────────────
       await waitForSelectorVisibleSmart(page, 'button[onclick*="OpenCreateGroupModal"]', 120000);
       await page.click('button[onclick*="OpenCreateGroupModal"]');
@@ -2040,11 +2059,12 @@ async function uploadFile(page, excelFile) {
           throw new Error(`Portal error after submit: ${errMsg}`);
         }
       }
+    }
 
-      // Continue with post-create workflow and only treat this file as fully
-      // processed after batch upload status confirms DONE.
-      await completeShareWorkflowAndWaitBatchDone(page, groupName, excelFile.name, 20 * 60 * 1000);
-    } catch (navErr) {
+    // Continue with post-create workflow and only treat this file as fully
+    // processed after batch upload status confirms DONE.
+    await completeShareWorkflowAndWaitBatchDone(page, groupName, excelFile.name, 20 * 60 * 1000);
+  } catch (navErr) {
       console.error(`❌ Create Group failed for "${excelFile.name}": ${navErr.message}`);
       try { await page.screenshot({ path: `nav-error-${fullBaseName}.png`, timeout: 5000 }); } catch {}
 
@@ -2126,7 +2146,6 @@ async function uploadFile(page, excelFile) {
         try { await page.screenshot({ path: `timeout-${fullBaseName}.png`, timeout: 5000 }); } catch {}
       }
       return { error: true };
-    }
   }
 
   // ── Mark DONE ─────────────────────────────────────────────────────────────
