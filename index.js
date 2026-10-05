@@ -141,6 +141,53 @@ async function smartPauseMs(remainingMs) {
   await new Promise(r => setTimeout(r, delayMs));
 }
 
+async function clickLocatorSmart(locator, label, timeoutMs = 15000) {
+  let lastErr = null;
+  try {
+    await locator.scrollIntoViewIfNeeded().catch(() => {});
+    await locator.click({ timeout: timeoutMs });
+    return 'clicked';
+  } catch (err) {
+    lastErr = err;
+  }
+
+  try {
+    await locator.click({ timeout: Math.max(3000, Math.floor(timeoutMs * 0.6)), force: true });
+    return 'force-clicked';
+  } catch (err) {
+    lastErr = err;
+  }
+
+  try {
+    await locator.evaluate((el) => {
+      if (!el) throw new Error('element missing');
+      el.click();
+    });
+    return 'js-clicked';
+  } catch (err) {
+    lastErr = err;
+  }
+
+  throw new Error(`${label} click failed: ${lastErr?.message || 'unknown reason'}`);
+}
+
+async function clickBySelectorSmart(page, selector, label, timeoutMs = 15000) {
+  const locator = page.locator(selector).first();
+  try {
+    await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+  } catch {}
+  try {
+    return await clickLocatorSmart(locator, label, timeoutMs);
+  } catch (err) {
+    try {
+      await page.dispatchEvent(selector, 'click');
+      return 'dispatch-clicked';
+    } catch {
+      throw err;
+    }
+  }
+}
+
 async function clickCreateGroupSubmitSmart(page, maxWaitMs = 360000) {
   const startedAt = Date.now();
   let lastRecoveryAt = 0;
@@ -394,7 +441,7 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
   // 1) Open filter control
   await waitForSelectorVisibleSmart(page, 'span.k-icon.k-i-filter', Math.max(20000, Math.min(getRemaining(), 120000)));
   try {
-    await page.locator('span.k-icon.k-i-filter').first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 20000)) });
+    await clickBySelectorSmart(page, 'span.k-icon.k-i-filter', 'filter icon', Math.max(5000, Math.min(getRemaining(), 20000)));
   } catch {
     await page.evaluate(() => {
       const icon = document.querySelector('span.k-icon.k-i-filter');
@@ -410,7 +457,7 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
   const filterInputSelector = 'input[data-bind="value:filters[0].value"], input.k-textbox[title="Value"]';
   await waitForSelectorVisibleSmart(page, filterInputSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
   const filterInput = page.locator(filterInputSelector).first();
-  await filterInput.click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await clickLocatorSmart(filterInput, 'group filter input', Math.max(5000, Math.min(getRemaining(), 15000)));
   await filterInput.fill('');
   await filterInput.fill(groupName);
   console.log(`✅ Group filter text entered: ${groupName}`);
@@ -418,7 +465,7 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
   // 3) Apply filter
   const filterButtonSelector = 'button[type="submit"][title="Filter"], button.k-button.k-primary:has-text("Filter")';
   await waitForSelectorVisibleSmart(page, filterButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
-  await page.locator(filterButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await clickBySelectorSmart(page, filterButtonSelector, 'filter button', Math.max(5000, Math.min(getRemaining(), 15000)));
   console.log('✅ Group filter applied');
 
   // Wait for group row to appear after filtering.
@@ -434,16 +481,17 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
   const manageBtn = groupRow.locator('button[aria-haspopup="true"]').filter({ hasText: 'Manage group' }).first();
   try {
     await manageBtn.waitFor({ state: 'visible', timeout: Math.max(10000, Math.min(getRemaining(), 90000)) });
-    await manageBtn.click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+    await clickLocatorSmart(manageBtn, 'manage group button', Math.max(5000, Math.min(getRemaining(), 15000)));
   } catch {
-    await page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+    const fallbackManage = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
+    await clickLocatorSmart(fallbackManage, 'manage group button fallback', Math.max(5000, Math.min(getRemaining(), 15000)));
   }
   console.log('✅ Manage Group menu opened');
 
   // 5) Click View Beneficiaries from dropdown
   const viewBeneficiariesSelector = 'a:has(span:has-text("View Beneficiaries")), a:has-text("View Beneficiaries")';
   await waitForSelectorVisibleSmart(page, viewBeneficiariesSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
-  await page.locator(viewBeneficiariesSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await clickBySelectorSmart(page, viewBeneficiariesSelector, 'view beneficiaries option', Math.max(5000, Math.min(getRemaining(), 15000)));
   await page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), {
     timeout: Math.max(20000, Math.min(getRemaining(), 120000)),
     waitUntil: 'domcontentloaded',
@@ -453,13 +501,13 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
   // 6) Click Share button
   const shareButtonSelector = 'button#uploadList, button.uk-button-secondary#uploadList, button:has-text("Share")#uploadList';
   await waitForSelectorVisibleSmart(page, shareButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
-  await page.locator(shareButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await clickBySelectorSmart(page, shareButtonSelector, 'share button', Math.max(5000, Math.min(getRemaining(), 15000)));
   console.log('✅ Share button clicked');
 
   // 7) Confirm OK on popup
   const okButtonSelector = 'button.uk-button.uk-button-primary:has-text("Ok"), button.uk-button.uk-button-primary:has-text("OK"), button.uk-button-primary[autofocus]';
   await waitForSelectorVisibleSmart(page, okButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
-  await page.locator(okButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await clickBySelectorSmart(page, okButtonSelector, 'share confirmation ok button', Math.max(5000, Math.min(getRemaining(), 15000)));
   console.log('✅ Share confirmation OK clicked');
 
   // 8) Wait for Batch Upload Status and monitor until DONE for this file/group
