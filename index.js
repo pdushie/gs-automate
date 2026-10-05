@@ -651,7 +651,7 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
 
   throw new Error(`Timed out waiting for Batch Upload Status DONE for ${fileName}`);
 }
-const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
+const KEEP_ALIVE_INTERVAL_MS = 3 * 60 * 1000; // refresh/visit portal if idle > 3 min to keep session alive
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
 const STATUS_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.status.json');
@@ -1052,6 +1052,7 @@ async function login(page) {
   const maxSubmitAttempts = 3;
   const OTP_INPUT_SELECTOR = 'input[type="password"][name="OTPCode"], input[name="OTPCode"]';
   const OTP_PAGE_READY_MAX_WAIT_MS = Math.max(120000, parseInt(process.env.OTP_PAGE_READY_MAX_WAIT_MS || '300000', 10));
+  const LOGIN_FIELDS_READY_MAX_WAIT_MS = Math.max(120000, parseInt(process.env.LOGIN_FIELDS_READY_MAX_WAIT_MS || '240000', 10));
 
   async function waitForOtpPageReady(maxWaitMs = OTP_PAGE_READY_MAX_WAIT_MS) {
     const startedAt = Date.now();
@@ -1230,8 +1231,59 @@ async function login(page) {
       console.log('✅ Already on OTP page — skipping credential submission');
     } else {
       const DISCLAIMER_SELECTOR = '#disclaimer-btn';
-      const MSISDN_SELECTOR = 'input[name="Msisdn"], input[placeholder="E.g 054xxxxxxx"]';
-      const PIN_SELECTOR = 'input[type="password"][name="Pin"], input[name="Pin"]';
+      const MSISDN_SELECTOR = [
+        'input[name="Msisdn"]',
+        'input[name*="msisdn" i]',
+        'input[id*="msisdn" i]',
+        'input[placeholder*="054"]',
+        'input[placeholder*="phone" i]',
+        'input[type="tel"]',
+      ].join(', ');
+      const PIN_SELECTOR = [
+        'input[type="password"][name="Pin"]',
+        'input[name="Pin"]',
+        'input[name*="pin" i][type="password"]',
+        'input[id*="pin" i][type="password"]',
+      ].join(', ');
+
+      async function waitForLoginFieldsReady(maxWaitMs = LOGIN_FIELDS_READY_MAX_WAIT_MS) {
+        const startedAt = Date.now();
+        let lastRecoveryAt = 0;
+
+        while (Date.now() - startedAt < maxWaitMs) {
+          if (page.url().includes('/account/verify-otp')) return { otpReady: true };
+
+          const msisdnVisible = await page.locator(MSISDN_SELECTOR).first().isVisible().catch(() => false);
+          const pinVisible = await page.locator(PIN_SELECTOR).first().isVisible().catch(() => false);
+          if (msisdnVisible && pinVisible) return { otpReady: false };
+
+          const remaining = maxWaitMs - (Date.now() - startedAt);
+          const sliceMs = Math.min(15000, remaining);
+          try {
+            await Promise.race([
+              page.waitForSelector(MSISDN_SELECTOR, { state: 'attached', timeout: sliceMs }),
+              page.waitForSelector(PIN_SELECTOR, { state: 'attached', timeout: sliceMs }),
+              page.waitForURL(url => url.href.includes('/account/verify-otp'), { timeout: sliceMs, waitUntil: 'domcontentloaded' }),
+            ]);
+          } catch {
+            // keep polling
+          }
+
+          if (Date.now() - lastRecoveryAt > 30000) {
+            try {
+              console.warn('⚠️  Login fields not ready yet — reloading login page and retrying...');
+              if (!page.url().includes('/account/login') && !page.url().includes('/account/verify-otp')) {
+                await gotoWithRetry(page, 'https://up2u.mtn.com.gh/account/login', { waitUntil: 'domcontentloaded', timeout: 90000 }, 2);
+              } else {
+                await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 60000 }, 2);
+              }
+            } catch {}
+            lastRecoveryAt = Date.now();
+          }
+        }
+
+        throw new Error(`Login fields not ready after ${Math.round(maxWaitMs / 1000)}s (url=${page.url()})`);
+      }
 
       // Some portal renders need a real click, others only respond to a
       // programmatic event. Some sessions skip the disclaimer and show login
@@ -1273,10 +1325,15 @@ async function login(page) {
         console.log('ℹ️  Disclaimer not required/visible — continuing to login fields');
       }
 
-      await page.waitForSelector(MSISDN_SELECTOR, {
-        state: 'visible',
-        timeout: 120000,
-      });
+      const fieldsState = await waitForLoginFieldsReady(LOGIN_FIELDS_READY_MAX_WAIT_MS);
+      if (fieldsState.otpReady) {
+        console.log('✅ OTP page reached while waiting for login fields — skipping credential entry');
+        await waitForOtpPageReady(OTP_PAGE_READY_MAX_WAIT_MS);
+      } else {
+        await page.waitForSelector(MSISDN_SELECTOR, {
+          state: 'visible',
+          timeout: 120000,
+        });
       const msisdnInput = page.locator(MSISDN_SELECTOR).first();
       await msisdnInput.click({ timeout: 10000 });
       await msisdnInput.fill('');
@@ -1296,6 +1353,7 @@ async function login(page) {
       await clickLoginButton('credentials');
       console.log('🚀 Login clicked');
       await waitForOtpPageReady(OTP_PAGE_READY_MAX_WAIT_MS);
+      }
     }
 
     // ── Phase 2+3: For each attempt, wait for OTP FIRST then submit ────────
@@ -2433,6 +2491,17 @@ async function run() {
     page = await context.newPage();
   }
 
+  // Session-recovery login path: always visit portal home first, then run full login.
+  async function reloginFromPortalHome() {
+    await gotoWithRetry(page, 'http://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 90000 }, 3);
+    try {
+      await waitForPortalReady(page, 120000);
+    } catch {
+      // login() below performs its own robust navigation/readiness handling.
+    }
+    await login(page);
+  }
+
   // context.addInitScript applies to every page opened from this context,
   // including pages we create fresh on login retries.
   let context = await browser.newContext(contextOptions);
@@ -2495,7 +2564,7 @@ async function run() {
             page = await context.newPage();
           }
           try {
-            await login(page);
+            await reloginFromPortalHome();
             reloginOk = true;
           } catch (loginErr) {
             if (!TRANSIENT_NAV_ERR.test(loginErr.message)) throw loginErr; // non-transient — fatal
@@ -2808,7 +2877,7 @@ async function run() {
                 page = await context.newPage();
               }
               try {
-                await login(page);
+                await reloginFromPortalHome();
                 reloginOk = true;
               } catch (loginErr) {
                 if (!TRANSIENT_NAV_ERR.test(loginErr.message)) throw loginErr;

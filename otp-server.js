@@ -11,7 +11,11 @@ let otpTimer = null;
 
 // ── OTP RECEIVER ───────────────────────────────────────────
 app.post('/otp', (req, res) => {
-  console.log('📩 Raw payload received:', JSON.stringify(req.body));
+  const payloadPreview = JSON.stringify(req.body || {});
+  console.log(`ℹ️  OTP webhook received (waiting=${Boolean(otpResolve)})`);
+  if (String(process.env.DEBUG_OTP_PAYLOAD || '').toLowerCase() === 'true') {
+    console.log('ℹ️  OTP payload (debug):', payloadPreview);
+  }
 
   const message =
     req.body?.message ||
