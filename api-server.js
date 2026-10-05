@@ -2206,8 +2206,20 @@ app.post('/evd/cancel-stuck', (req, res) => {
 // Body: { amount? }  — if provided, overrides each account's configured amount.
 // Accepts internal calls authenticated with X-Internal-Dashboard: 1.
 app.post('/evd/trigger-now', async (req, res) => {
-  const isDashboard = req.headers['x-internal-dashboard'] === '1' || isAuthenticated(req);
+  const isInternalCall = req.headers['x-internal-dashboard'] === '1';
+  const isAuthedUser = isAuthenticated(req);
+  const isDashboard = isInternalCall || isAuthedUser;
   if (!isDashboard) return res.status(401).json({ success: false, error: 'Unauthorized' });
+
+  // Respect EVD auto toggle for internal automatic calls from the bot.
+  // Authenticated dashboard users can still trigger manually when needed.
+  if (isInternalCall && !isAuthedUser && !evdAutoIsEnabled()) {
+    return res.status(409).json({
+      success: false,
+      error: 'EVD auto-loader is disabled',
+      code: 'EVD_AUTO_DISABLED',
+    });
+  }
 
   const overrideAmount = req.body?.amount != null ? parseFloat(req.body.amount) : null;
   if (overrideAmount !== null && (isNaN(overrideAmount) || overrideAmount < 1)) {

@@ -23,6 +23,25 @@ function escapeHtml(str) {
 const UPLOADED_LOG = path.join(process.env.EXCEL_FOLDER_PATH || '.', '.uploaded.json');
 const IDLE_REFRESH_INTERVAL = 25 * 1000;
 
+// Hot-path file caches to reduce repeated disk reads in tight polling loops.
+// Keep TTL short so cross-process writes (api-server) become visible quickly.
+const STATUS_LOG_CACHE_TTL_MS = Math.max(100, parseInt(process.env.STATUS_LOG_CACHE_TTL_MS || '750', 10));
+const UPLOADED_LOG_CACHE_TTL_MS = Math.max(250, parseInt(process.env.UPLOADED_LOG_CACHE_TTL_MS || '2000', 10));
+const _fileCache = {
+  status: { data: null, at: 0 },
+  uploaded: { data: null, at: 0 },
+};
+
+function invalidateStatusLogCache() {
+  _fileCache.status.data = null;
+  _fileCache.status.at = 0;
+}
+
+function invalidateUploadedLogCache() {
+  _fileCache.uploaded.data = null;
+  _fileCache.uploaded.at = 0;
+}
+
 // Transient network error patterns — these are portal/connection blips, not code bugs.
 // Transient network / navigation error patterns — portal blips and Playwright
 // navigation timeouts are both retriable; only logic/auth errors are fatal.
@@ -746,14 +765,31 @@ function getFileKey(filePath) {
 }
 
 function loadStatusLog() {
+  const now = Date.now();
+  if (_fileCache.status.data && now - _fileCache.status.at < STATUS_LOG_CACHE_TTL_MS) {
+    return _fileCache.status.data;
+  }
+
   try {
-    if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+    if (fs.existsSync(STATUS_LOG)) {
+      const parsed = JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+      _fileCache.status.data = parsed;
+      _fileCache.status.at = now;
+      return parsed;
+    }
   } catch {
     // Retry once — may have caught the file mid-rename during an atomic write
     try {
-      if (fs.existsSync(STATUS_LOG)) return JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+      if (fs.existsSync(STATUS_LOG)) {
+        const parsed = JSON.parse(fs.readFileSync(STATUS_LOG, 'utf8'));
+        _fileCache.status.data = parsed;
+        _fileCache.status.at = now;
+        return parsed;
+      }
     } catch {}
   }
+  _fileCache.status.data = {};
+  _fileCache.status.at = now;
   return {};
 }
 
@@ -762,6 +798,8 @@ function updateStatusLog(updates) {
     const log = loadStatusLog();
     Object.assign(log, updates);
     atomicWrite(STATUS_LOG, JSON.stringify(log, null, 2));
+    _fileCache.status.data = log;
+    _fileCache.status.at = Date.now();
   });
 }
 
@@ -956,13 +994,30 @@ async function interruptibleSleep(ms, checkIntervalMs = 5000) {
 }
 
 function loadUploadedLog() {
+  const now = Date.now();
+  if (_fileCache.uploaded.data && now - _fileCache.uploaded.at < UPLOADED_LOG_CACHE_TTL_MS) {
+    return _fileCache.uploaded.data;
+  }
+
   try {
-    if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+    if (fs.existsSync(UPLOADED_LOG)) {
+      const parsed = JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+      _fileCache.uploaded.data = parsed;
+      _fileCache.uploaded.at = now;
+      return parsed;
+    }
   } catch {
     try {
-      if (fs.existsSync(UPLOADED_LOG)) return JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+      if (fs.existsSync(UPLOADED_LOG)) {
+        const parsed = JSON.parse(fs.readFileSync(UPLOADED_LOG, 'utf8'));
+        _fileCache.uploaded.data = parsed;
+        _fileCache.uploaded.at = now;
+        return parsed;
+      }
     } catch {}
   }
+  _fileCache.uploaded.data = [];
+  _fileCache.uploaded.at = now;
   return [];
 }
 
@@ -972,6 +1027,8 @@ function markAsUploaded(fileName) {
     if (!log.includes(fileName)) {
       log.push(fileName);
       atomicWrite(UPLOADED_LOG, JSON.stringify(log, null, 2));
+      _fileCache.uploaded.data = log;
+      _fileCache.uploaded.at = Date.now();
       console.log(`📝 Marked as uploaded: ${fileName}`);
     }
   });
@@ -1477,6 +1534,11 @@ async function login(page) {
 // Called when purchaseData detects insufficient GH¢ balance so the bot doesn't have to
 // wait up to EVD_AUTO_POLL_MINS (3 min) for the scheduled auto-loader to fire.
 async function triggerEvdTopUp(neededGhc) {
+  if (!isAutoPurchaseEnabled()) {
+    console.log('⏸️  Skipping EVD trigger-now — auto purchase/EVD auto-loader is disabled');
+    return;
+  }
+
   const EVD_PURCHASE_TARGET_GHC = parseFloat(process.env.EVD_PURCHASE_TARGET_GHC || '4813');
   const amount = Math.max(1, Math.ceil(neededGhc > 0 ? neededGhc : EVD_PURCHASE_TARGET_GHC));
   const port   = process.env.API_INTERNAL_PORT || 7070;
