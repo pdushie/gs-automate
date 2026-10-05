@@ -162,7 +162,7 @@ async function clickLocatorSmart(locator, label, timeoutMs = 15000) {
     await locator.evaluate((el) => {
       if (!el) throw new Error('element missing');
       el.click();
-    });
+    }, null, { timeout: Math.max(2000, Math.floor(timeoutMs * 0.5)) });
     return 'js-clicked';
   } catch (err) {
     lastErr = err;
@@ -478,25 +478,50 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
 
   // 4) Click Manage group for that row
   const groupRow = page.locator('tr.k-master-row, tbody tr').filter({ hasText: groupName }).first();
-  const manageBtn = groupRow.locator('button[aria-haspopup="true"]').filter({ hasText: 'Manage group' }).first();
-  try {
-    await manageBtn.waitFor({ state: 'visible', timeout: Math.max(10000, Math.min(getRemaining(), 90000)) });
-    await clickLocatorSmart(manageBtn, 'manage group button', Math.max(5000, Math.min(getRemaining(), 15000)));
-  } catch {
-    const fallbackManage = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
-    await clickLocatorSmart(fallbackManage, 'manage group button fallback', Math.max(5000, Math.min(getRemaining(), 15000)));
-  }
-  console.log('✅ Manage Group menu opened');
+  const clickManageGroupMenu = async () => {
+    const manageBtn = groupRow.locator('button[aria-haspopup="true"]').filter({ hasText: 'Manage group' }).first();
+    try {
+      await manageBtn.waitFor({ state: 'visible', timeout: Math.max(10000, Math.min(getRemaining(), 90000)) });
+      await clickLocatorSmart(manageBtn, 'manage group button', Math.max(5000, Math.min(getRemaining(), 15000)));
+      return;
+    } catch {
+      const fallbackManage = page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first();
+      await clickLocatorSmart(fallbackManage, 'manage group button fallback', Math.max(5000, Math.min(getRemaining(), 15000)));
+    }
+  };
 
-  // 5) Click View Beneficiaries from dropdown
   const viewBeneficiariesSelector = 'a:has(span:has-text("View Beneficiaries")), a:has-text("View Beneficiaries")';
-  await waitForSelectorVisibleSmart(page, viewBeneficiariesSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
-  await clickBySelectorSmart(page, viewBeneficiariesSelector, 'view beneficiaries option', Math.max(5000, Math.min(getRemaining(), 15000)));
-  await page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), {
-    timeout: Math.max(20000, Math.min(getRemaining(), 120000)),
-    waitUntil: 'domcontentloaded',
-  });
-  console.log('✅ View Beneficiaries opened');
+  const viewStepStart = Date.now();
+  while (Date.now() - viewStepStart < Math.max(60000, Math.min(getRemaining(), 180000))) {
+    await clickManageGroupMenu();
+    console.log('✅ Manage Group menu opened');
+
+    try {
+      await waitForSelectorVisibleSmart(page, viewBeneficiariesSelector, Math.max(5000, Math.min(getRemaining(), 30000)));
+      await clickBySelectorSmart(page, viewBeneficiariesSelector, 'view beneficiaries option', Math.max(5000, Math.min(getRemaining(), 15000)));
+    } catch (clickErr) {
+      // Dropdown can close/stale quickly; reopen and retry.
+      console.warn(`⚠️  View Beneficiaries click not ready yet: ${clickErr.message} — retrying...`);
+      await smartPauseMs(getRemaining());
+      continue;
+    }
+
+    try {
+      await page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), {
+        timeout: Math.max(8000, Math.min(getRemaining(), 45000)),
+        waitUntil: 'domcontentloaded',
+      });
+      console.log('✅ View Beneficiaries opened');
+      break;
+    } catch {
+      // Menu action may not register on the first try under slow UI conditions.
+      await smartPauseMs(getRemaining());
+    }
+  }
+
+  if (!/\/beneficiaries\/groups\//i.test(page.url())) {
+    throw new Error('Timed out opening View Beneficiaries after multiple retries');
+  }
 
   // 6) Click Share button
   const shareButtonSelector = 'button#uploadList, button.uk-button-secondary#uploadList, button:has-text("Share")#uploadList';
@@ -2063,7 +2088,39 @@ async function uploadFile(page, excelFile) {
 
     // Continue with post-create workflow and only treat this file as fully
     // processed after batch upload status confirms DONE.
-    await completeShareWorkflowAndWaitBatchDone(page, groupName, excelFile.name, 20 * 60 * 1000);
+    // Retry this workflow in-place once for transient UI/menu timing issues
+    // so we do not burn a full file retry attempt on a recoverable click timeout.
+    let workflowErr = null;
+    for (let wfAttempt = 1; wfAttempt <= 2; wfAttempt++) {
+      try {
+        if (wfAttempt > 1) {
+          console.warn(`⚠️  Re-running share/status workflow (${wfAttempt}/2) for "${excelFile.name}"...`);
+          try {
+            await gotoManageGroupsSmart(page, 120000);
+            await waitForManageGroupsReady(page, 60000);
+          } catch {}
+        }
+
+        await completeShareWorkflowAndWaitBatchDone(page, groupName, excelFile.name, 20 * 60 * 1000);
+        workflowErr = null;
+        break;
+      } catch (err) {
+        workflowErr = err;
+        const msg = String(err?.message || '');
+        const recoverable =
+          TRANSIENT_NAV_ERR.test(msg) ||
+          /view beneficiaries|manage group|batch upload status|click failed|timed out|timeout/i.test(msg);
+
+        if (!recoverable || wfAttempt >= 2) {
+          throw err;
+        }
+        console.warn(`⚠️  Share/status workflow transient failure: ${msg}`);
+      }
+    }
+
+    if (workflowErr) {
+      throw workflowErr;
+    }
   } catch (navErr) {
       console.error(`❌ Create Group failed for "${excelFile.name}": ${navErr.message}`);
       try { await page.screenshot({ path: `nav-error-${fullBaseName}.png`, timeout: 5000 }); } catch {}
@@ -2746,7 +2803,33 @@ async function run() {
             fileToUpload = mergedFile;
           }
 
-          const uploadResult = await uploadFile(page, fileToUpload);
+          let uploadResult = null;
+          for (let uploadAttempt = 1; uploadAttempt <= 2; uploadAttempt++) {
+            uploadResult = await uploadFile(page, fileToUpload);
+
+            // Retry once immediately on transient navigation/UI failures instead
+            // of deferring straight to the next scan cycle.
+            if (uploadResult && uploadResult.error && uploadAttempt < 2) {
+              console.warn(`⚠️ Upload navigation error for "${fileToUpload.name}" — retrying once immediately...`);
+              try {
+                if (!await isSessionActive(page)) {
+                  console.warn('🔒 Session inactive after upload error — re-logging before immediate retry...');
+                  await login(page);
+                }
+              } catch (retryLoginErr) {
+                console.warn(`⚠️  Immediate retry re-login failed: ${retryLoginErr.message}`);
+              }
+
+              try {
+                await gotoManageGroupsSmart(page, 120000);
+              } catch (retryNavErr) {
+                console.warn(`⚠️  Immediate retry pre-navigation failed: ${retryNavErr.message}`);
+              }
+              continue;
+            }
+
+            break;
+          }
 
           if (uploadResult && uploadResult.blocked) {
             console.warn('⏳ MTN is still processing a previous upload. Stopping batch — will retry all pending files next scan.');
