@@ -321,7 +321,13 @@ async function clickCreateGroupSubmitSmart(page, maxWaitMs = 360000) {
 }
 
 async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
-  const selector = 'input[name="DataBundle"]';
+  const selectors = [
+    'input[name="DataBundle"]',
+    'input[name*="DataBundle" i]',
+    'input[data-role="numerictextbox"]',
+    'span.k-numerictextbox input.k-input',
+  ];
+  const selector = selectors.join(', ');
   const startedAt = Date.now();
   let lastRecoveryAt = 0;
 
@@ -334,11 +340,28 @@ async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
     const visibleNow = await page.locator(selector).first().isVisible().catch(() => false);
     if (visibleNow) return;
 
+    // Some portal renders keep the input hidden while Kendo initializes.
+    // Accept readiness when the widget/input is attached and purchase actions are visible.
+    const widgetReady = await page.evaluate(() => {
+      const bundleInput =
+        document.querySelector('input[name="DataBundle"]') ||
+        document.querySelector('input[name*="DataBundle" i]') ||
+        document.querySelector('input[data-role="numerictextbox"]') ||
+        document.querySelector('span.k-numerictextbox input.k-input');
+      if (!bundleInput) return false;
+      const calcBtn = Array.from(document.querySelectorAll('button'))
+        .find(b => /calculate\s*package\s*cost/i.test((b.textContent || '').trim()));
+      return !!calcBtn;
+    }).catch(() => false);
+    if (widgetReady) return;
+
     const remaining = maxWaitMs - (Date.now() - startedAt);
     const sliceMs = Math.min(15000, remaining);
     try {
       await Promise.race([
         page.waitForSelector(selector, { state: 'visible', timeout: sliceMs }),
+        page.waitForSelector(selector, { state: 'attached', timeout: sliceMs }),
+        page.waitForSelector('button.uk-button-primary:has-text("Calculate Package Cost")', { state: 'visible', timeout: sliceMs }),
         page.waitForSelector('h3[data-bind*="BalanceFormatted"]', { state: 'visible', timeout: sliceMs }),
       ]);
     } catch {
@@ -348,12 +371,29 @@ async function waitForPurchaseFormReady(page, maxWaitMs = 180000) {
     const visibleAfterWait = await page.locator(selector).first().isVisible().catch(() => false);
     if (visibleAfterWait) return;
 
+    const widgetReadyAfterWait = await page.evaluate(() => {
+      const bundleInput =
+        document.querySelector('input[name="DataBundle"]') ||
+        document.querySelector('input[name*="DataBundle" i]') ||
+        document.querySelector('input[data-role="numerictextbox"]') ||
+        document.querySelector('span.k-numerictextbox input.k-input');
+      const calcBtn = Array.from(document.querySelectorAll('button'))
+        .find(b => /calculate\s*package\s*cost/i.test((b.textContent || '').trim()));
+      return !!bundleInput && !!calcBtn;
+    }).catch(() => false);
+    if (widgetReadyAfterWait) return;
+
     // Recovery for slow/stale UI state: periodic lightweight reload while
     // staying on the same purchase page.
     if (Date.now() - lastRecoveryAt > 30000) {
       try {
-        console.warn('⚠️  Purchase form still not visible — reloading purchase page and retrying...');
-        await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 45000 }, 2);
+        console.warn('⚠️  Purchase form still not visible — reopening purchase page and retrying...');
+        const onPurchasePage = page.url().includes('/business/purchase-bundles');
+        if (!onPurchasePage) {
+          await gotoWithRetry(page, 'https://up2u.mtn.com.gh/business/purchase-bundles', { waitUntil: 'domcontentloaded', timeout: 60000 }, 2);
+        } else {
+          await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: 60000 }, 2);
+        }
       } catch {}
       lastRecoveryAt = Date.now();
     }
@@ -1508,8 +1548,14 @@ async function purchaseData(page, context) {
   // Set Data bundle value to 1.5 via Kendo NumericTextBox API
   await waitForPurchaseFormReady(page, 180000);
   await page.evaluate(() => {
-    const input = document.querySelector('input[name="DataBundle"]');
+    const input =
+      document.querySelector('input[name="DataBundle"]') ||
+      document.querySelector('input[name*="DataBundle" i]') ||
+      document.querySelector('input[data-role="numerictextbox"]') ||
+      document.querySelector('span.k-numerictextbox input.k-input');
+    if (!input) throw new Error('DataBundle input not found');
     const widget = kendo.widgetInstance(jQuery(input));
+    if (!widget) throw new Error('DataBundle Kendo widget not ready');
     widget.value(1.5);
     widget.trigger('change');
   });
