@@ -380,6 +380,155 @@ async function gotoManageGroupsSmart(page, maxWaitMs = 180000) {
 
   throw new Error(`Timed out navigating to manage-groups after ${Math.round(maxWaitMs / 1000)}s`);
 }
+
+async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, maxWaitMs = 20 * 60 * 1000) {
+  const startedAt = Date.now();
+  let lastRecoveryAt = 0;
+
+  const getRemaining = () => maxWaitMs - (Date.now() - startedAt);
+
+  // Ensure we are on Manage Groups for the filter/search workflow.
+  await gotoManageGroupsSmart(page, Math.max(120000, Math.min(getRemaining(), 300000)));
+  await waitForManageGroupsReady(page, Math.max(60000, Math.min(getRemaining(), 180000)));
+
+  // 1) Open filter control
+  await waitForSelectorVisibleSmart(page, 'span.k-icon.k-i-filter', Math.max(20000, Math.min(getRemaining(), 120000)));
+  try {
+    await page.locator('span.k-icon.k-i-filter').first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 20000)) });
+  } catch {
+    await page.evaluate(() => {
+      const icon = document.querySelector('span.k-icon.k-i-filter');
+      if (!icon) throw new Error('Filter icon not found');
+      const clickable = icon.closest('button, a, [role="button"], th, td, span');
+      if (!clickable) throw new Error('No clickable ancestor for filter icon');
+      clickable.click();
+    });
+  }
+  console.log('✅ Group filter opened');
+
+  // 2) Enter group name into filter text box
+  const filterInputSelector = 'input[data-bind="value:filters[0].value"], input.k-textbox[title="Value"]';
+  await waitForSelectorVisibleSmart(page, filterInputSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
+  const filterInput = page.locator(filterInputSelector).first();
+  await filterInput.click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await filterInput.fill('');
+  await filterInput.fill(groupName);
+  console.log(`✅ Group filter text entered: ${groupName}`);
+
+  // 3) Apply filter
+  const filterButtonSelector = 'button[type="submit"][title="Filter"], button.k-button.k-primary:has-text("Filter")';
+  await waitForSelectorVisibleSmart(page, filterButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
+  await page.locator(filterButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  console.log('✅ Group filter applied');
+
+  // Wait for group row to appear after filtering.
+  await page.waitForFunction((name) => {
+    for (const row of document.querySelectorAll('tr.k-master-row, tbody tr')) {
+      if ((row.textContent || '').includes(name)) return true;
+    }
+    return false;
+  }, groupName, { timeout: Math.max(20000, Math.min(getRemaining(), 120000)) });
+
+  // 4) Click Manage group for that row
+  const groupRow = page.locator('tr.k-master-row, tbody tr').filter({ hasText: groupName }).first();
+  const manageBtn = groupRow.locator('button[aria-haspopup="true"]').filter({ hasText: 'Manage group' }).first();
+  try {
+    await manageBtn.waitFor({ state: 'visible', timeout: Math.max(10000, Math.min(getRemaining(), 90000)) });
+    await manageBtn.click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  } catch {
+    await page.locator('button[aria-haspopup="true"]', { hasText: 'Manage group' }).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  }
+  console.log('✅ Manage Group menu opened');
+
+  // 5) Click View Beneficiaries from dropdown
+  const viewBeneficiariesSelector = 'a:has(span:has-text("View Beneficiaries")), a:has-text("View Beneficiaries")';
+  await waitForSelectorVisibleSmart(page, viewBeneficiariesSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
+  await page.locator(viewBeneficiariesSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  await page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), {
+    timeout: Math.max(20000, Math.min(getRemaining(), 120000)),
+    waitUntil: 'domcontentloaded',
+  });
+  console.log('✅ View Beneficiaries opened');
+
+  // 6) Click Share button
+  const shareButtonSelector = 'button#uploadList, button.uk-button-secondary#uploadList, button:has-text("Share")#uploadList';
+  await waitForSelectorVisibleSmart(page, shareButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
+  await page.locator(shareButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  console.log('✅ Share button clicked');
+
+  // 7) Confirm OK on popup
+  const okButtonSelector = 'button.uk-button.uk-button-primary:has-text("Ok"), button.uk-button.uk-button-primary:has-text("OK"), button.uk-button-primary[autofocus]';
+  await waitForSelectorVisibleSmart(page, okButtonSelector, Math.max(20000, Math.min(getRemaining(), 120000)));
+  await page.locator(okButtonSelector).first().click({ timeout: Math.max(5000, Math.min(getRemaining(), 15000)) });
+  console.log('✅ Share confirmation OK clicked');
+
+  // 8) Wait for Batch Upload Status and monitor until DONE for this file/group
+  try {
+    await page.waitForURL(url => /batch.*upload.*status|upload.*status|batch-upload-status/i.test(url.href), {
+      timeout: Math.max(30000, Math.min(getRemaining(), 180000)),
+      waitUntil: 'domcontentloaded',
+    });
+  } catch {
+    // Some portal flows update content in-place; continue with polling below.
+  }
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    const remaining = getRemaining();
+    const currentUrl = page.url();
+    if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
+      throw new Error(`Redirected to auth page while monitoring batch upload status: ${currentUrl}`);
+    }
+
+    const statusProbe = await page.evaluate(({ group, file }) => {
+      const rows = Array.from(document.querySelectorAll('tr, tbody tr'));
+      const norm = (s) => String(s || '').toLowerCase();
+      const groupKey = norm(group);
+      const fileKey = norm(file);
+      const fileKeyNoExt = fileKey.replace(/\.xlsx?$/, '');
+
+      for (const row of rows) {
+        const text = norm(row.textContent || '');
+        if (!text) continue;
+        const matches = text.includes(groupKey) || text.includes(fileKey) || text.includes(fileKeyNoExt);
+        if (!matches) continue;
+
+        if (/\b(done|completed|success|successful|processed)\b/.test(text)) {
+          return { state: 'done', rowText: row.textContent || '' };
+        }
+        if (/\b(fail|failed|error|rejected|abandon)\b/.test(text)) {
+          return { state: 'failed', rowText: row.textContent || '' };
+        }
+        if (/\b(processing|pending|queued|in\s*progress|uploading)\b/.test(text)) {
+          return { state: 'processing', rowText: row.textContent || '' };
+        }
+        return { state: 'matched-unknown', rowText: row.textContent || '' };
+      }
+
+      return { state: 'not-found', rowText: '' };
+    }, { group: groupName, file: fileName }).catch(() => ({ state: 'not-found', rowText: '' }));
+
+    if (statusProbe.state === 'done') {
+      console.log(`✅ Batch upload status DONE for ${fileName}`);
+      return;
+    }
+    if (statusProbe.state === 'failed') {
+      throw new Error(`Batch upload status indicates failure for ${fileName}: ${statusProbe.rowText.trim()}`);
+    }
+
+    const recoveryWindowMs = Math.max(12000, Math.min(45000, Math.floor(remaining * 0.15)));
+    if (Date.now() - lastRecoveryAt > recoveryWindowMs) {
+      try {
+        console.warn(`⚠️  Batch status still ${statusProbe.state} for ${fileName} — refreshing status page...`);
+        await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: smartSliceMs(remaining, 10000, 90000) }, 2);
+      } catch {}
+      lastRecoveryAt = Date.now();
+    }
+
+    await smartPauseMs(remaining);
+  }
+
+  throw new Error(`Timed out waiting for Batch Upload Status DONE for ${fileName}`);
+}
 const KEEP_ALIVE_INTERVAL_MS = 2.5 * 60 * 1000; // reload portal page if idle > 2.5 min
 let _lastPortalNavAt = 0; // updated after every real page navigation to portal
 
@@ -574,19 +723,38 @@ async function sendCallback(filename, status, completedAt, orderOverride = null)
     }
   }
 
-  const url = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback?secret=${encodeURIComponent(secret)}`;
+  if (orderOverride && orderOverride.entryIds) {
+    payload.entryIds = orderOverride.entryIds;
+  } else if (orderOverride && orderOverride.entryId) {
+    payload.entryId = orderOverride.entryId;
+  } else {
+    const statusLog = loadStatusLog();
+    if (statusLog[`${filename}_entryIds`]) {
+      payload.entryIds = statusLog[`${filename}_entryIds`];
+    } else if (statusLog[`${filename}_entryId`]) {
+      payload.entryId = statusLog[`${filename}_entryId`];
+    }
+  }
+
+  const callbackEndpoint = `${orderSystemUrl.replace(/\/$/, '')}/api/groupshare/callback`;
+  // Keep query-secret fallback for older receivers while also sending the
+  // recommended Authorization Bearer signature.
+  const url = `${callbackEndpoint}?secret=${encodeURIComponent(secret)}`;
   const body = JSON.stringify(payload);
 
   const MAX_ATTEMPTS   = 5;
   const RETRY_DELAYS   = [10_000, 30_000, 60_000, 120_000]; // ms between attempts
 
-  console.log(`📡 Sending callback for "${filename}" (${status}) to ${orderSystemUrl}...`);
+  console.log(`📡 Sending callback for "${filename}" (${status}) to ${callbackEndpoint}...`);
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${secret}`,
+        },
         body,
       });
       if (res.ok) {
@@ -1403,11 +1571,11 @@ function buildMergedFile(files) {
   const totalAllocationMB = files.reduce((sum, f) => sum + f.totalMB, 0);
   console.log(`📎 Merged ${files.length} file(s) → ${mergedName} (${(totalAllocationMB / 1024).toFixed(2)} GB, ${allDataRows.length} rows)`);
 
-  // Load order IDs for each source file from status log.
-  // Flat keys (_orderId/_orderIds) are set at upload time. If a file was
-  // previously merged and its order IDs only exist inside an older batch
+  // Load order/entry IDs for each source file from status log.
+  // Flat keys (_orderId/_orderIds and _entryId/_entryIds) are set at upload time.
+  // If a file was previously merged and IDs only exist inside an older batch
   // record's sourceFiles[], scan those records as a fallback so callbacks
-  // on retry attempts always include the correct order references.
+  // on retry attempts always include the correct references.
   const log = loadStatusLog();
   const sourceFiles = files.map(f => {
     const entry = { filename: f.name, allocationMB: f.totalMB, callbackSentAt: null };
@@ -1429,6 +1597,26 @@ function buildMergedFile(files) {
         }
       }
     }
+
+    if (log[`${f.name}_entryIds`]) {
+      entry.entryIds = log[`${f.name}_entryIds`];
+    } else if (log[`${f.name}_entryId`]) {
+      entry.entryId = log[`${f.name}_entryId`];
+    } else {
+      // Fallback: scan all previous merged batch records for this source file
+      let bestCreatedAt = null;
+      for (const [, val] of Object.entries(log)) {
+        if (val === null || typeof val !== 'object' || !val.sourceFiles || !val.createdAt) continue;
+        const prev = val.sourceFiles.find(s => s.filename === f.name);
+        if (!prev) continue;
+        if (!bestCreatedAt || val.createdAt > bestCreatedAt) {
+          bestCreatedAt = val.createdAt;
+          if (prev.entryIds) { entry.entryIds = prev.entryIds; delete entry.entryId; }
+          else if (prev.entryId) { entry.entryId = prev.entryId; delete entry.entryIds; }
+        }
+      }
+    }
+
     return entry;
   });
 
@@ -1586,7 +1774,7 @@ function splitFileToFitBalance(file, availableMB) {
   const partAMB = partARows.reduce((s, r) => s + (parseFloat(r[dataMBColIndex]) || 0), 0);
   const partBMB = partBRows.reduce((s, r) => s + (parseFloat(r[dataMBColIndex]) || 0), 0);
 
-  // Carry order IDs from the original file to both parts (for manual traceability)
+  // Carry order/entry IDs from the original file to both parts (for traceability)
   const log = loadStatusLog();
   const orderUpdates = {};
   if (log[`${file.name}_orderIds`]) {
@@ -1595,6 +1783,13 @@ function splitFileToFitBalance(file, availableMB) {
   } else if (log[`${file.name}_orderId`]) {
     orderUpdates[`${partAName}_orderId`] = log[`${file.name}_orderId`];
     orderUpdates[`${partBName}_orderId`] = log[`${file.name}_orderId`];
+  }
+  if (log[`${file.name}_entryIds`]) {
+    orderUpdates[`${partAName}_entryIds`] = log[`${file.name}_entryIds`];
+    orderUpdates[`${partBName}_entryIds`] = log[`${file.name}_entryIds`];
+  } else if (log[`${file.name}_entryId`]) {
+    orderUpdates[`${partAName}_entryId`] = log[`${file.name}_entryId`];
+    orderUpdates[`${partBName}_entryId`] = log[`${file.name}_entryId`];
   }
 
   updateStatusLog({
@@ -1797,6 +1992,10 @@ async function uploadFile(page, excelFile) {
           throw new Error(`Portal error after submit: ${errMsg}`);
         }
       }
+
+      // Continue with post-create workflow and only treat this file as fully
+      // processed after batch upload status confirms DONE.
+      await completeShareWorkflowAndWaitBatchDone(page, groupName, excelFile.name, 20 * 60 * 1000);
     } catch (navErr) {
       console.error(`❌ Create Group failed for "${excelFile.name}": ${navErr.message}`);
       try { await page.screenshot({ path: `nav-error-${fullBaseName}.png`, timeout: 5000 }); } catch {}

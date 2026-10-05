@@ -94,7 +94,7 @@ function collectSpreadsheetEntries(folderPath) {
   return listFilesRecursive(folderPath).filter(entry => isSpreadsheetFile(entry.fullPath));
 }
 
-function coerceOrderIds(value) {
+function coerceIdList(value) {
   if (Array.isArray(value) && value.length > 0) return value;
   if (typeof value === 'string' && value.trim()) {
     try {
@@ -104,6 +104,14 @@ function coerceOrderIds(value) {
     return [value];
   }
   return null;
+}
+
+function coerceOrderIds(value) {
+  return coerceIdList(value);
+}
+
+function coerceEntryIds(value) {
+  return coerceIdList(value);
 }
 
 
@@ -392,6 +400,8 @@ function cleanupOldFiles() {
           delete freshLog[filename + '_partnerPart'];
           delete freshLog[filename + '_orderIds'];
           delete freshLog[filename + '_orderId'];
+          delete freshLog[filename + '_entryIds'];
+          delete freshLog[filename + '_entryId'];
           delete freshLog[filename + '_abandonedReason'];
         }
         saveStatusLog(freshLog);
@@ -420,6 +430,8 @@ function cleanupOldFiles() {
           delete freshLog[key + '_totalMB_mtime'];
           delete freshLog[key + '_orderIds'];
           delete freshLog[key + '_orderId'];
+          delete freshLog[key + '_entryIds'];
+          delete freshLog[key + '_entryId'];
           splitsPruned++;
         }
       }
@@ -675,6 +687,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       }
 
       const uploadOrderIds = coerceOrderIds(req.body?.orderIds);
+      const uploadEntryIds = coerceEntryIds(req.body?.entryIds);
       const orderMeta = { _fileReceived: true };
       const extracted = [];
       for (const file of extractedFiles) {
@@ -691,6 +704,11 @@ app.post('/upload', upload.single('file'), async (req, res) => {
           orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
         } else if (req.body?.orderId) {
           orderMeta[`${file.name}_orderId`] = req.body.orderId;
+        }
+        if (uploadEntryIds) {
+          orderMeta[`${file.name}_entryIds`] = uploadEntryIds;
+        } else if (req.body?.entryId) {
+          orderMeta[`${file.name}_entryId`] = req.body.entryId;
         }
         extracted.push({
           filename: file.name,
@@ -738,10 +756,22 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   withFileLock(STATUS_LOG, () => {
     const log = loadStatusLog();
     const updates = { _fileReceived: true, [`${req.file.filename}_queuedAt`]: queuedAt };
+    const uploadOrderIds = coerceOrderIds(req.body?.orderIds);
+    const uploadEntryIds = coerceEntryIds(req.body?.entryIds);
     if (uploadStats.totalDataGB != null) {
       updates[`${req.file.filename}_totalMB`] = Math.round(uploadStats.totalDataGB * 1024);
       updates[`${req.file.filename}_rowCount`] = uploadStats.rowCount;
       updates[`${req.file.filename}_totalMB_mtime`] = uploadStat.mtime.toISOString();
+    }
+    if (uploadOrderIds) {
+      updates[`${req.file.filename}_orderIds`] = uploadOrderIds;
+    } else if (req.body?.orderId) {
+      updates[`${req.file.filename}_orderId`] = req.body.orderId;
+    }
+    if (uploadEntryIds) {
+      updates[`${req.file.filename}_entryIds`] = uploadEntryIds;
+    } else if (req.body?.entryId) {
+      updates[`${req.file.filename}_entryId`] = req.body.entryId;
     }
     saveStatusLog({ ...log, ...updates });
   });
@@ -759,7 +789,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
 // POST /upload-base64 — accept Excel or zip as base64 string
 app.post('/upload-base64', async (req, res) => {
-  const { filename, data, orderId, orderIds } = req.body;
+  const { filename, data, orderId, orderIds, entryId, entryIds } = req.body;
 
   if (!filename || !data) {
     return res.status(400).json({ success: false, error: 'filename and data are required' });
@@ -812,6 +842,7 @@ app.post('/upload-base64', async (req, res) => {
       }
 
       const uploadOrderIds = coerceOrderIds(orderIds);
+      const uploadEntryIds = coerceEntryIds(entryIds);
       const orderMeta = { _fileReceived: true };
       const extracted = [];
       for (const file of extractedFiles) {
@@ -828,6 +859,11 @@ app.post('/upload-base64', async (req, res) => {
           orderMeta[`${file.name}_orderIds`] = uploadOrderIds;
         } else if (orderId) {
           orderMeta[`${file.name}_orderId`] = orderId;
+        }
+        if (uploadEntryIds) {
+          orderMeta[`${file.name}_entryIds`] = uploadEntryIds;
+        } else if (entryId) {
+          orderMeta[`${file.name}_entryId`] = entryId;
         }
         extracted.push({
           filename: file.name,
@@ -859,16 +895,23 @@ app.post('/upload-base64', async (req, res) => {
 
     // Persist order reference(s) and wake the idle bot
     const orderMeta = { _fileReceived: true, [`${savedName}_queuedAt`]: queuedAt };
+    const uploadOrderIds = coerceOrderIds(orderIds);
+    const uploadEntryIds = coerceEntryIds(entryIds);
     if (statsFromBuffer.totalDataGB != null) {
       const stat = fs.statSync(savePath);
       orderMeta[`${savedName}_totalMB`] = Math.round(statsFromBuffer.totalDataGB * 1024);
       orderMeta[`${savedName}_rowCount`] = statsFromBuffer.rowCount;
       orderMeta[`${savedName}_totalMB_mtime`] = stat.mtime.toISOString();
     }
-    if (Array.isArray(orderIds) && orderIds.length > 0) {
-      orderMeta[`${savedName}_orderIds`] = orderIds;
+    if (uploadOrderIds) {
+      orderMeta[`${savedName}_orderIds`] = uploadOrderIds;
     } else if (orderId) {
       orderMeta[`${savedName}_orderId`] = orderId;
+    }
+    if (uploadEntryIds) {
+      orderMeta[`${savedName}_entryIds`] = uploadEntryIds;
+    } else if (entryId) {
+      orderMeta[`${savedName}_entryId`] = entryId;
     }
     if (Object.keys(orderMeta).length > 0) {
       withFileLock(STATUS_LOG, () => {
