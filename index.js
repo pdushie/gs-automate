@@ -2057,6 +2057,18 @@ async function uploadFile(page, excelFile) {
     return { error: true };
   }
 
+  async function sendCallbackAndReturnHome(filename, status, completedAt, orderOverride = null) {
+    await sendCallback(filename, status, completedAt, orderOverride);
+    try {
+      await gotoWithRetry(page, 'https://up2u.mtn.com.gh', { waitUntil: 'domcontentloaded', timeout: 90000 }, 3);
+      await waitForPortalReady(page, 120000);
+      _lastPortalNavAt = Date.now();
+      console.log(`↩️  Returned to portal home after callback (${status}) for "${filename}"`);
+    } catch (navErr) {
+      console.warn(`⚠️  Post-callback portal-home navigation failed for "${filename}": ${navErr.message}`);
+    }
+  }
+
   if (excelFile.isMerged) {
     withFileLock(STATUS_LOG, () => {
       const l = loadStatusLog();
@@ -2265,10 +2277,10 @@ async function uploadFile(page, excelFile) {
               updateStatusLog({ [partBName]: 'ABANDONED', [`${partBName}_timedOutAt`]: timedOutAt, [`${partBName}_abandonedReason`]: `Part A "${excelFile.name}" was abandoned` });
               try { fs.unlinkSync(path.join(process.env.EXCEL_FOLDER_PATH, partBName)); } catch {}
               sendAlert('🚫 MTN GroupShare — Split Part A Abandoned', `"${excelFile.name}" (split Part A) abandoned after ${retryCount} failures.\nPart B "${partBName}" also abandoned.`);
-              await sendCallback(partBName, 'ABANDONED', timedOutAt);
+              await sendCallbackAndReturnHome(partBName, 'ABANDONED', timedOutAt);
             } else {
               sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed ${retryCount} times and has been abandoned.`);
-              await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+              await sendCallbackAndReturnHome(excelFile.name, 'ABANDONED', timedOutAt);
             }
           } else if (navAbandonLog[`${excelFile.name}_isSplitFinal`]) {
             const originalFile = navAbandonLog[`${excelFile.name}_originalFile`] || excelFile.name;
@@ -2282,7 +2294,7 @@ async function uploadFile(page, excelFile) {
             }
           } else {
             sendAlert('🚫 MTN GroupShare — File Abandoned', `"${excelFile.name}" failed ${retryCount} times and has been abandoned.`);
-            await sendCallback(excelFile.name, 'ABANDONED', timedOutAt);
+            await sendCallbackAndReturnHome(excelFile.name, 'ABANDONED', timedOutAt);
           }
         }
         console.error(`🚫 ${excelFile.name} — abandoned after ${retryCount} failure(s)`);
@@ -2334,7 +2346,7 @@ async function uploadFile(page, excelFile) {
       if (src.callbackSentAt) {
         console.log(`ℹ️  Callback already sent for "${src.filename}" — skipping`);
       } else {
-        await sendCallback(src.filename, 'DONE', completedAt, src);
+        await sendCallbackAndReturnHome(src.filename, 'DONE', completedAt, src);
         withFileLock(STATUS_LOG, () => {
           const l = loadStatusLog();
           const rec = l[excelFile.name] || {};
@@ -2362,7 +2374,7 @@ async function uploadFile(page, excelFile) {
       console.log(`✂️  Split Part A "${excelFile.name}" DONE — holding callback until Part B completes`);
       updateStatusLog({ _fileReceived: true });
     } else {
-      await sendCallback(excelFile.name, 'DONE', completedAt);
+      await sendCallbackAndReturnHome(excelFile.name, 'DONE', completedAt);
     }
   }
 
