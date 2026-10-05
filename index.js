@@ -428,6 +428,45 @@ async function gotoManageGroupsSmart(page, maxWaitMs = 180000) {
   throw new Error(`Timed out navigating to manage-groups after ${Math.round(maxWaitMs / 1000)}s`);
 }
 
+async function waitForViewBeneficiariesReady(page, maxWaitMs = 180000) {
+  const startedAt = Date.now();
+  let lastRecoveryAt = 0;
+
+  while (Date.now() - startedAt < maxWaitMs) {
+    const remaining = maxWaitMs - (Date.now() - startedAt);
+    const currentUrl = page.url();
+
+    if (currentUrl.includes('/account/login') || currentUrl.includes('/account/verify-otp')) {
+      throw new Error(`Redirected to auth page while waiting for View Beneficiaries: ${currentUrl}`);
+    }
+
+    const onBeneficiariesUrl = /\/beneficiaries\/groups\//i.test(currentUrl);
+    const shareVisible = await page.locator('#uploadList, button#uploadList').first().isVisible().catch(() => false);
+    if (onBeneficiariesUrl && shareVisible) return;
+
+    const sliceMs = smartSliceMs(remaining, 6000, 30000);
+    try {
+      await Promise.race([
+        page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), { timeout: sliceMs, waitUntil: 'domcontentloaded' }),
+        page.waitForSelector('#uploadList, button#uploadList', { state: 'visible', timeout: sliceMs }),
+      ]);
+    } catch {
+      // Keep polling with periodic recovery until max wait is exceeded.
+    }
+
+    if (Date.now() - lastRecoveryAt > Math.max(12000, Math.min(45000, Math.floor(remaining * 0.2)))) {
+      try {
+        await reloadWithRetry(page, { waitUntil: 'domcontentloaded', timeout: smartSliceMs(remaining, 8000, 60000) }, 2);
+      } catch {}
+      lastRecoveryAt = Date.now();
+    }
+
+    await smartPauseMs(remaining);
+  }
+
+  throw new Error(`Timed out waiting for View Beneficiaries page readiness after ${Math.round(maxWaitMs / 1000)}s`);
+}
+
 async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, maxWaitMs = 20 * 60 * 1000) {
   const startedAt = Date.now();
   let lastRecoveryAt = 0;
@@ -498,25 +537,35 @@ async function completeShareWorkflowAndWaitBatchDone(page, groupName, fileName, 
 
     try {
       await waitForSelectorVisibleSmart(page, viewBeneficiariesSelector, Math.max(5000, Math.min(getRemaining(), 30000)));
-      await clickBySelectorSmart(page, viewBeneficiariesSelector, 'view beneficiaries option', Math.max(5000, Math.min(getRemaining(), 15000)));
+
+      const rawHref = await page.locator(viewBeneficiariesSelector).first().getAttribute('href').catch(() => null);
+      const href = rawHref ? String(rawHref).trim() : '';
+      if (href) {
+        const absoluteUrl = href.startsWith('http') ? href : `https://up2u.mtn.com.gh${href.startsWith('/') ? '' : '/'}${href}`;
+        await gotoWithRetry(page, absoluteUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: Math.max(10000, Math.min(getRemaining(), 60000)),
+        }, 2);
+        await waitForViewBeneficiariesReady(page, Math.max(30000, Math.min(getRemaining(), 180000)));
+      } else {
+        // Fallback for unexpected markup where href is missing.
+        await clickBySelectorSmart(page, viewBeneficiariesSelector, 'view beneficiaries option', Math.max(5000, Math.min(getRemaining(), 15000)));
+        await waitForViewBeneficiariesReady(page, Math.max(30000, Math.min(getRemaining(), 180000)));
+      }
     } catch (clickErr) {
       // Dropdown can close/stale quickly; reopen and retry.
-      console.warn(`⚠️  View Beneficiaries click not ready yet: ${clickErr.message} — retrying...`);
+      console.warn(`⚠️  View Beneficiaries navigation not ready yet: ${clickErr.message} — retrying...`);
       await smartPauseMs(getRemaining());
       continue;
     }
 
-    try {
-      await page.waitForURL(url => /\/beneficiaries\/groups\//i.test(url.href), {
-        timeout: Math.max(8000, Math.min(getRemaining(), 45000)),
-        waitUntil: 'domcontentloaded',
-      });
+    if (/\/beneficiaries\/groups\//i.test(page.url())) {
       console.log('✅ View Beneficiaries opened');
       break;
-    } catch {
-      // Menu action may not register on the first try under slow UI conditions.
-      await smartPauseMs(getRemaining());
     }
+
+    // Menu action may not register on the first try under slow UI conditions.
+    await smartPauseMs(getRemaining());
   }
 
   if (!/\/beneficiaries\/groups\//i.test(page.url())) {
