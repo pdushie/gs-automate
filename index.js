@@ -776,6 +776,7 @@ const ALERT_COOLDOWN_MS = parseInt(process.env.ALERT_COOLDOWN_MINS || '5') * 60 
 const ALERT_NO_COOLDOWN = new Set([
   '🎉 MTN GroupShare — Airtime Loaded',
   '🎉 MTN GroupShare — Data Purchased',
+  '🎉 MTN GroupShare — Upload Completed',
   '🚫 MTN GroupShare — Merged Batch Abandoned',
   '🚫 MTN GroupShare — File Abandoned',
   '❌ MTN GroupShare — Merged Upload Failed',
@@ -1613,6 +1614,33 @@ async function purchaseData(page, context) {
   const { balanceText: newBalanceText, totalMB: newBalanceMB } = await checkBalance(page, context);
   console.log(`💰 Balance after purchase: ${newBalanceText} (${newBalanceMB.toFixed(2)} MB)`);
 
+  // Idempotency guard: if a duplicate purchase success path is triggered shortly
+  // after a confirmed purchase (same post-purchase balance snapshot), suppress
+  // extra alert + batch-count increment.
+  const duplicateGuardLog = loadStatusLog();
+  const DUP_WINDOW_MS = 10 * 60 * 1000;
+  const lastSuccessAtRaw = duplicateGuardLog._lastPurchaseSuccessAt;
+  const lastSuccessMB = Number(duplicateGuardLog._lastPurchaseSuccessMB || 0);
+  const lastSuccessValid = Number.isFinite(lastSuccessMB) && lastSuccessMB > 0;
+  const nowMs = Date.now();
+  const lastSuccessAtMs = lastSuccessAtRaw ? new Date(lastSuccessAtRaw).getTime() : 0;
+  const mbDrift = Math.abs((Number(newBalanceMB) || 0) - (lastSuccessValid ? lastSuccessMB : 0));
+  const likelyDuplicateSuccess =
+    lastSuccessAtMs > 0 &&
+    (nowMs - lastSuccessAtMs) < DUP_WINDOW_MS &&
+    lastSuccessValid &&
+    mbDrift < 1024; // within 1 GB of last success snapshot
+
+  if (likelyDuplicateSuccess) {
+    console.warn('⚠️  Duplicate purchase-success signal detected — suppressing extra alert and batch-count increment');
+    updateStatusLog({
+      _purchaseStatus: 'DONE',
+      _purchaseNote: `Duplicate success suppressed — balance after: ${newBalanceText}`,
+      _purchaseCompletedAt: new Date().toISOString(),
+    });
+    return true;
+  }
+
   console.log('🎉 Data purchase complete!');
 
   // ── Daily batch count ─────────────────────────────────────────────────────
@@ -1632,6 +1660,8 @@ async function purchaseData(page, context) {
     _purchaseStatus: 'DONE',
     _purchaseNote: `1.5 TB (1 TB 512 GB) @ GH¢ 4,812.96 — balance after: ${newBalanceText}`,
     _purchaseCompletedAt: new Date().toISOString(),
+    _lastPurchaseSuccessAt: new Date().toISOString(),
+    _lastPurchaseSuccessMB: newBalanceMB,
     _batchCountDate: todayUTC,
     _batchCountToday: newCount,
     _batchCountTotal: newTotal,
@@ -2426,7 +2456,7 @@ async function uploadFile(page, excelFile) {
 
   try { await page.screenshot({ path: `done-${fullBaseName}.png`, timeout: 5000 }); } catch (ssErr) { console.warn(`⚠️  Screenshot failed: ${ssErr.message}`); }
   console.log(`🎉 ${excelFile.name} — DONE!`);
-  sendAlert('🎉 MTN GroupShare — Data Purchased', `"${groupName}" group created and beneficiaries uploaded successfully.`);
+  sendAlert('🎉 MTN GroupShare — Upload Completed', `"${groupName}" group created and beneficiaries uploaded successfully.`);
   return true;
 }
 
